@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Windows;
+using LanShare.ViewModels;
 using Forms = System.Windows.Forms;
 
 namespace LanShare.ServerApp;
@@ -71,5 +72,13 @@ public partial class ServerWindow : Window
         _notifyIcon.Visible = false;
         Close();
         System.Windows.Application.Current.Shutdown();
+    }
+
+    private void SharedPathsDataGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (DataContext is ServerViewModel viewModel)
+        {
+            viewModel.OpenSelectedSharedPath();
+        }
     }
 }

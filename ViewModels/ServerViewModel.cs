@@ -36,6 +36,9 @@ public sealed class ServerViewModel : BindableBase
     private bool _ruleDelete;
     private bool _ruleInheritToChildren = true;
     private SharedPathItem? _selectedSharedPath;
+    private string _sharedPathSearchText = string.Empty;
+    private string _currentSharedBrowsePath = string.Empty;
+    private List<SharedPathItem> _currentSharedPathEntries = [];
 
     public ServerViewModel(
         AppConfig config,
@@ -59,6 +62,8 @@ public sealed class ServerViewModel : BindableBase
         LoadSelectedRuleCommand = new RelayCommand(LoadSelectedRuleIntoEditor, () => SelectedPermissionRule is not null);
         ResetPermissionEditorCommand = new RelayCommand(ResetPermissionEditor);
         RefreshSharedPathsCommand = new RelayCommand(RefreshSharedPaths);
+        NavigateUpSharedPathCommand = new RelayCommand(NavigateUpSharedPath, () => CanNavigateUpSharedPath);
+        OpenSelectedSharedPathCommand = new RelayCommand(OpenSelectedSharedPath, () => SelectedSharedPath is { IsDirectory: true });
 
         Users = new ObservableCollection<UserAccount>(_config.Permissions.Users);
         PermissionRules = new ObservableCollection<PermissionRule>();
@@ -111,8 +116,8 @@ public sealed class ServerViewModel : BindableBase
             {
                 _config.Server.SharedFolderPath = value;
                 RaisePropertyChanged();
-                RefreshSharedPaths();
                 RaisePropertyChanged(nameof(SharedPathPreviewTitle));
+                RefreshSharedPaths();
                 RaiseServerCommandStates();
             }
         }
@@ -168,6 +173,8 @@ public sealed class ServerViewModel : BindableBase
         ? "路径预览"
         : $"路径预览：{SharedFolderPath}";
 
+    public string CurrentSharedBrowseDisplay => string.IsNullOrWhiteSpace(CurrentSharedBrowsePath) ? "/" : $"/{CurrentSharedBrowsePath}";
+
     public string ServerStatus
     {
         get => _serverStatus;
@@ -201,6 +208,7 @@ public sealed class ServerViewModel : BindableBase
             if (SetProperty(ref _selectedSharedPath, value))
             {
                 RuleDirectoryPath = value?.RelativePath ?? string.Empty;
+                OpenSelectedSharedPathCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -220,7 +228,14 @@ public sealed class ServerViewModel : BindableBase
     public string RuleDirectoryPath
     {
         get => _ruleDirectoryPath;
-        set => SetProperty(ref _ruleDirectoryPath, NormalizeRelativePath(value));
+        set
+        {
+            var normalizedPath = NormalizeRelativePath(value);
+            if (SetProperty(ref _ruleDirectoryPath, normalizedPath))
+            {
+                SyncPathSelections(normalizedPath);
+            }
+        }
     }
 
     public PermissionRuleEffect SelectedRuleEffect
@@ -271,6 +286,34 @@ public sealed class ServerViewModel : BindableBase
         set => SetProperty(ref _ruleInheritToChildren, value);
     }
 
+    public string SharedPathSearchText
+    {
+        get => _sharedPathSearchText;
+        set
+        {
+            if (SetProperty(ref _sharedPathSearchText, value))
+            {
+                ApplySharedPathFilter();
+            }
+        }
+    }
+
+    public string CurrentSharedBrowsePath
+    {
+        get => _currentSharedBrowsePath;
+        private set
+        {
+            if (SetProperty(ref _currentSharedBrowsePath, value))
+            {
+                RaisePropertyChanged(nameof(CurrentSharedBrowseDisplay));
+                RaisePropertyChanged(nameof(CanNavigateUpSharedPath));
+                NavigateUpSharedPathCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool CanNavigateUpSharedPath => !string.IsNullOrWhiteSpace(CurrentSharedBrowsePath);
+
     public RelayCommand BrowseFolderCommand { get; }
 
     public AsyncRelayCommand StartServerCommand { get; }
@@ -288,6 +331,10 @@ public sealed class ServerViewModel : BindableBase
     public RelayCommand ResetPermissionEditorCommand { get; }
 
     public RelayCommand RefreshSharedPathsCommand { get; }
+
+    public RelayCommand NavigateUpSharedPathCommand { get; }
+
+    public RelayCommand OpenSelectedSharedPathCommand { get; }
 
     private void BrowseFolder()
     {
@@ -429,9 +476,11 @@ public sealed class ServerViewModel : BindableBase
         RaisePropertyChanged(nameof(SavePermissionRuleButtonText));
         RemovePermissionRuleCommand.RaiseCanExecuteChanged();
         LoadSelectedRuleCommand.RaiseCanExecuteChanged();
+        OpenSelectedSharedPathCommand.RaiseCanExecuteChanged();
 
         SelectedRuleUserName = Users.FirstOrDefault(user => user.IsEnabled)?.UserName ?? "guest";
         RuleDirectoryPath = string.Empty;
+        SharedPathSearchText = string.Empty;
         SelectedRuleEffect = PermissionRuleEffect.Allow;
         RuleRead = true;
         RuleWrite = false;
@@ -459,6 +508,7 @@ public sealed class ServerViewModel : BindableBase
         RuleWrite = (SelectedPermissionRule.Permissions & FilePermission.Write) == FilePermission.Write;
         RuleDelete = (SelectedPermissionRule.Permissions & FilePermission.Delete) == FilePermission.Delete;
         RuleInheritToChildren = SelectedPermissionRule.InheritToChildren;
+        OpenSharedBrowserToPath(GetParentRelativePath(SelectedPermissionRule.DirectoryPath));
         SelectedSharedPath = SharedPaths.FirstOrDefault(item =>
             string.Equals(item.RelativePath, SelectedPermissionRule.DirectoryPath, StringComparison.OrdinalIgnoreCase));
 
@@ -467,48 +517,44 @@ public sealed class ServerViewModel : BindableBase
 
     private void RefreshSharedPaths()
     {
-        SharedPaths.Clear();
-
         if (string.IsNullOrWhiteSpace(SharedFolderPath) || !Directory.Exists(SharedFolderPath))
         {
+            CurrentSharedBrowsePath = string.Empty;
+            _currentSharedPathEntries = [];
+            SharedPaths.Clear();
             SelectedSharedPath = null;
             return;
         }
 
-        SharedPaths.Add(new SharedPathItem
+        var targetPath = CurrentSharedBrowsePath;
+        if (!TryResolveBrowsePath(targetPath, out _))
         {
-            RelativePath = string.Empty,
-            IsDirectory = true
-        });
-
-        foreach (var item in EnumerateSharedPaths(SharedFolderPath))
-        {
-            SharedPaths.Add(item);
+            targetPath = string.Empty;
         }
 
-        if (!string.IsNullOrWhiteSpace(RuleDirectoryPath))
-        {
-            SelectedSharedPath = SharedPaths.FirstOrDefault(item =>
-                string.Equals(item.RelativePath, RuleDirectoryPath, StringComparison.OrdinalIgnoreCase));
-        }
+        LoadSharedPathEntries(targetPath);
     }
 
-    private IEnumerable<SharedPathItem> EnumerateSharedPaths(string rootPath)
+    private IEnumerable<SharedPathItem> EnumerateCurrentDirectory(string rootPath, string relativePath)
     {
-        foreach (var directory in Directory.EnumerateDirectories(rootPath, "*", SearchOption.AllDirectories).OrderBy(path => path))
+        var currentPhysicalPath = string.IsNullOrWhiteSpace(relativePath)
+            ? rootPath
+            : Path.Combine(rootPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+        foreach (var directory in Directory.EnumerateDirectories(currentPhysicalPath).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             yield return new SharedPathItem
             {
-                RelativePath = Path.GetRelativePath(rootPath, directory).Replace('\\', '/'),
+                RelativePath = NormalizeRelativePath(Path.GetRelativePath(rootPath, directory)),
                 IsDirectory = true
             };
         }
 
-        foreach (var file in Directory.EnumerateFiles(rootPath, "*", SearchOption.AllDirectories).OrderBy(path => path))
+        foreach (var file in Directory.EnumerateFiles(currentPhysicalPath).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             yield return new SharedPathItem
             {
-                RelativePath = Path.GetRelativePath(rootPath, file).Replace('\\', '/'),
+                RelativePath = NormalizeRelativePath(Path.GetRelativePath(rootPath, file)),
                 IsDirectory = false
             };
         }
@@ -585,6 +631,8 @@ public sealed class ServerViewModel : BindableBase
         BrowseFolderCommand.RaiseCanExecuteChanged();
         StartServerCommand.RaiseCanExecuteChanged();
         StopServerCommand.RaiseCanExecuteChanged();
+        NavigateUpSharedPathCommand.RaiseCanExecuteChanged();
+        OpenSelectedSharedPathCommand.RaiseCanExecuteChanged();
     }
 
     private static string NormalizeRelativePath(string path)
@@ -612,5 +660,163 @@ public sealed class ServerViewModel : BindableBase
                 && rule.Permissions == candidate.Permissions
                 && rule.InheritToChildren == candidate.InheritToChildren;
         });
+    }
+
+    private void ApplySharedPathFilter()
+    {
+        SharedPaths.Clear();
+
+        if (_currentSharedPathEntries.Count == 0)
+        {
+            return;
+        }
+
+        var query = (SharedPathSearchText ?? string.Empty).Trim();
+        var matches = _currentSharedPathEntries
+            .Where(item => MatchesSharedPath(item, query))
+            .OrderBy(item => item.IsDirectory ? 0 : 1)
+            .ThenBy(item => GetSharedPathMatchRank(item, query))
+            .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var match in matches)
+        {
+            SharedPaths.Add(match);
+        }
+    }
+
+    private void SyncPathSelections(string normalizedPath)
+    {
+        var exactMatch = _currentSharedPathEntries.FirstOrDefault(item =>
+            string.Equals(item.RelativePath, normalizedPath, StringComparison.OrdinalIgnoreCase));
+
+        if (!ReferenceEquals(_selectedSharedPath, exactMatch))
+        {
+            _selectedSharedPath = exactMatch;
+            RaisePropertyChanged(nameof(SelectedSharedPath));
+        }
+    }
+
+    public void OpenSelectedSharedPath()
+    {
+        if (SelectedSharedPath is not { IsDirectory: true })
+        {
+            return;
+        }
+
+        OpenSharedBrowserToPath(SelectedSharedPath.RelativePath);
+    }
+
+    private void NavigateUpSharedPath()
+    {
+        OpenSharedBrowserToPath(GetParentRelativePath(CurrentSharedBrowsePath));
+    }
+
+    private void OpenSharedBrowserToPath(string relativePath)
+    {
+        LoadSharedPathEntries(relativePath);
+    }
+
+    private void LoadSharedPathEntries(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(SharedFolderPath) || !Directory.Exists(SharedFolderPath))
+        {
+            return;
+        }
+
+        var normalizedPath = NormalizeRelativePath(relativePath);
+        if (!TryResolveBrowsePath(normalizedPath, out _))
+        {
+            return;
+        }
+
+        CurrentSharedBrowsePath = normalizedPath;
+        _currentSharedPathEntries = EnumerateCurrentDirectory(SharedFolderPath, normalizedPath).ToList();
+        ApplySharedPathFilter();
+
+        if (!string.IsNullOrWhiteSpace(RuleDirectoryPath))
+        {
+            SelectedSharedPath = SharedPaths.FirstOrDefault(item =>
+                string.Equals(item.RelativePath, RuleDirectoryPath, StringComparison.OrdinalIgnoreCase));
+        }
+        else
+        {
+            SelectedSharedPath = null;
+        }
+    }
+
+    private bool TryResolveBrowsePath(string relativePath, out string fullPath)
+    {
+        fullPath = string.Empty;
+        if (string.IsNullOrWhiteSpace(SharedFolderPath) || !Directory.Exists(SharedFolderPath))
+        {
+            return false;
+        }
+
+        var rootPath = Path.GetFullPath(SharedFolderPath);
+        var combinedPath = string.IsNullOrWhiteSpace(relativePath)
+            ? rootPath
+            : Path.GetFullPath(Path.Combine(rootPath, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+
+        if (!combinedPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(combinedPath))
+        {
+            return false;
+        }
+
+        fullPath = combinedPath;
+        return true;
+    }
+
+    private static bool MatchesSharedPath(SharedPathItem item, string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return true;
+        }
+
+        return item.Name.Contains(query, StringComparison.OrdinalIgnoreCase)
+               || item.DisplayPath.Contains(query, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int GetSharedPathMatchRank(SharedPathItem item, string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return 0;
+        }
+
+        if (string.Equals(item.Name, query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        if (item.Name.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 1;
+        }
+
+        if (item.DisplayPath.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 2;
+        }
+
+        if (item.DisplayPath.Contains(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 3;
+        }
+
+        return 4;
+    }
+
+    private static string GetParentRelativePath(string path)
+    {
+        var normalized = NormalizeRelativePath(path);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        var index = normalized.LastIndexOf('/');
+        return index < 0 ? string.Empty : normalized[..index];
     }
 }

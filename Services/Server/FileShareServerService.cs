@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
+using System.IO.Compression;
+using System.Net.Http.Headers;
 using LanShare.Models;
 using LanShare.Services.Permissions;
 using Microsoft.AspNetCore.Builder;
@@ -17,6 +19,11 @@ public sealed class FileShareServerService : IFileShareServerService
     private readonly FileExtensionContentTypeProvider _contentTypeProvider = new();
     private readonly ConcurrentDictionary<string, ConnectedClientInfo> _recentClients = new(StringComparer.OrdinalIgnoreCase);
     private readonly IPermissionService _permissionService;
+    private readonly string _diagnosticLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "LanShare.Server",
+        "logs",
+        "directory-download.log");
     private WebApplication? _webApplication;
     private string? _sharedFolderPath;
     private PermissionConfig _permissionConfig = new();
@@ -38,6 +45,7 @@ public sealed class FileShareServerService : IFileShareServerService
     public async Task StartAsync(ServerStartOptions options, CancellationToken cancellationToken = default)
     {
         await StopAsync(cancellationToken);
+        LogDirectoryDownloadTrace("服务端启动", $"sharedFolder={options.SharedFolderPath}, servicePort={options.ServicePort}, discoveryPort={options.DiscoveryPort}");
 
         _sharedFolderPath = options.SharedFolderPath;
         _permissionConfig = options.Permissions ?? new PermissionConfig();
@@ -48,6 +56,7 @@ public sealed class FileShareServerService : IFileShareServerService
         builder.WebHost.ConfigureKestrel(kestrelOptions =>
         {
             kestrelOptions.Limits.MaxRequestBodySize = null;
+            kestrelOptions.AllowSynchronousIO = true;
         });
         builder.Services.Configure<FormOptions>(formOptions =>
         {
@@ -94,6 +103,63 @@ public sealed class FileShareServerService : IFileShareServerService
                 : "application/octet-stream";
 
             return Results.File(fullPath, contentType, fileDownloadName: Path.GetFileName(fullPath), enableRangeProcessing: true);
+        });
+
+        app.MapGet("/api/download-directory", async (HttpContext context, string? user, string path, CancellationToken token) =>
+        {
+            try
+            {
+                LogDirectoryDownloadTrace("收到目录下载请求", $"原始 path={path}, user={user}, remoteIp={context.Connection.RemoteIpAddress}");
+                TrackClient(context);
+                var effectiveUser = GetEffectiveUser(user);
+                var relativePath = NormalizeRelativePath(path);
+                LogDirectoryDownloadTrace("目录下载请求已规范化", $"relativePath={relativePath}, effectiveUser={effectiveUser}");
+
+                var hasReadPermission = HasPermission(effectiveUser, relativePath, FilePermission.Read);
+                LogDirectoryDownloadTrace("目录下载权限检查完成", $"relativePath={relativePath}, effectiveUser={effectiveUser}, hasReadPermission={hasReadPermission}");
+                if (!hasReadPermission)
+                {
+                    LogDirectoryDownloadTrace("目录下载请求被拒绝", $"relativePath={relativePath}, effectiveUser={effectiveUser}");
+                    return Results.Forbid();
+                }
+
+                var fullPath = ResolvePath(relativePath);
+                LogDirectoryDownloadTrace("目录下载路径解析完成", $"relativePath={relativePath}, resolvedPath={fullPath}");
+                if (fullPath is null || !Directory.Exists(fullPath))
+                {
+                    LogDirectoryDownloadTrace("目录下载目标不存在", $"relativePath={relativePath}, resolvedPath={fullPath}");
+                    return Results.NotFound();
+                }
+
+                context.Response.ContentType = "application/zip";
+                var archiveFileName = $"{Path.GetFileName(fullPath)}.zip";
+                var contentDisposition = new ContentDispositionHeaderValue("attachment");
+                contentDisposition.FileName = "download.zip";
+                contentDisposition.FileNameStar = archiveFileName;
+                context.Response.Headers.ContentDisposition = contentDisposition.ToString();
+                LogDirectoryDownloadTrace("开始打包目录", $"relativePath={relativePath}, fullPath={fullPath}");
+
+                using var archive = new ZipArchive(context.Response.Body, ZipArchiveMode.Create, leaveOpen: true);
+                await WriteDirectoryToArchiveAsync(archive, effectiveUser, fullPath, token);
+                LogDirectoryDownloadTrace("目录打包完成", $"relativePath={relativePath}, fullPath={fullPath}");
+                return Results.Empty;
+            }
+            catch (DirectoryDownloadException ex)
+            {
+                LogDirectoryDownloadFailure(NormalizeRelativePath(path), ex.FailedPath, ex);
+                return Results.Problem(
+                    detail: $"目录下载失败，文件无法读取：{ex.FailedPath}。{ex.Message}",
+                    statusCode: StatusCodes.Status500InternalServerError,
+                    title: "Directory download failed");
+            }
+            catch (Exception ex)
+            {
+                LogDirectoryDownloadFailure(NormalizeRelativePath(path), path, ex);
+                return Results.Problem(
+                    detail: $"目录下载失败：{path}。{ex.Message}",
+                    statusCode: StatusCodes.Status500InternalServerError,
+                    title: "Directory download failed");
+            }
         });
 
         app.MapPost("/api/upload", async (HttpRequest request, string? user, string? path, CancellationToken token) =>
@@ -320,6 +386,142 @@ public sealed class FileShareServerService : IFileShareServerService
         }
 
         EnsureAuthorized(userName, relativePath, FilePermission.Delete);
+    }
+
+    private async Task WriteDirectoryToArchiveAsync(
+        ZipArchive archive,
+        string userName,
+        string fullPath,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var enumerationOptions = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.ReparsePoint
+        };
+
+        foreach (var directoryPath in Directory.EnumerateDirectories(fullPath, "*", enumerationOptions))
+        {
+            var childRelativePath = NormalizeRelativePath(Path.GetRelativePath(_sharedFolderPath!, directoryPath));
+            if (!HasPermission(userName, childRelativePath, FilePermission.Read))
+            {
+                continue;
+            }
+
+            try
+            {
+                var archiveEntryName = Path.GetRelativePath(fullPath, directoryPath).Replace('\\', '/') + "/";
+                archive.CreateEntry(archiveEntryName);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue;
+            }
+            catch (IOException)
+            {
+                continue;
+            }
+        }
+
+        foreach (var filePath in Directory.EnumerateFiles(fullPath, "*", enumerationOptions))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var childRelativePath = NormalizeRelativePath(Path.GetRelativePath(_sharedFolderPath!, filePath));
+            if (!HasPermission(userName, childRelativePath, FilePermission.Read))
+            {
+                continue;
+            }
+
+            try
+            {
+                var archiveEntryName = Path.GetRelativePath(fullPath, filePath).Replace('\\', '/');
+                var entry = archive.CreateEntry(archiveEntryName, CompressionLevel.Fastest);
+                await using var entryStream = entry.Open();
+                await using var fileStream = new FileStream(
+                    filePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                await fileStream.CopyToAsync(entryStream, cancellationToken);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new DirectoryDownloadException(filePath, "访问被拒绝或文件正被其它程序独占。");
+            }
+            catch (IOException ex)
+            {
+                throw new DirectoryDownloadException(filePath, ex.Message, ex);
+            }
+            catch (Exception ex) when (ex is not DirectoryDownloadException)
+            {
+                throw new DirectoryDownloadException(filePath, ex.Message, ex);
+            }
+        }
+    }
+
+    private void LogDirectoryDownloadFailure(string requestedRelativePath, string failedPath, Exception exception)
+    {
+        try
+        {
+            var logDirectory = Path.GetDirectoryName(_diagnosticLogPath);
+            if (!string.IsNullOrWhiteSpace(logDirectory))
+            {
+                Directory.CreateDirectory(logDirectory);
+            }
+
+            var message = string.Join(
+                Environment.NewLine,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 目录下载失败",
+                $"请求路径: {requestedRelativePath}",
+                $"失败文件: {failedPath}",
+                $"异常类型: {exception.GetType().FullName}",
+                $"异常消息: {exception.Message}",
+                exception.StackTrace ?? string.Empty,
+                new string('-', 80));
+
+            File.AppendAllText(_diagnosticLogPath, message + Environment.NewLine, System.Text.Encoding.UTF8);
+        }
+        catch
+        {
+        }
+    }
+
+    private void LogDirectoryDownloadTrace(string stage, string detail)
+    {
+        try
+        {
+            var logDirectory = Path.GetDirectoryName(_diagnosticLogPath);
+            if (!string.IsNullOrWhiteSpace(logDirectory))
+            {
+                Directory.CreateDirectory(logDirectory);
+            }
+
+            var message = string.Join(
+                Environment.NewLine,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {stage}",
+                detail,
+                new string('-', 80));
+
+            File.AppendAllText(_diagnosticLogPath, message + Environment.NewLine, System.Text.Encoding.UTF8);
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed class DirectoryDownloadException : IOException
+    {
+        public DirectoryDownloadException(string failedPath, string message, Exception? innerException = null)
+            : base(message, innerException)
+        {
+            FailedPath = failedPath;
+        }
+
+        public string FailedPath { get; }
     }
 
     private string? ResolvePath(string relativePath)

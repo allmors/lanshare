@@ -12,6 +12,7 @@
         WindowStartupLocation="CenterScreen"
         Background="#F4F6F8">
     <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
         <infra:SystemFileIconConverter x:Key="SystemFileIconConverter" />
 
         <Style x:Key="SurfaceStyle" TargetType="Border">
@@ -79,36 +80,15 @@
 
         <Border Grid.Row="1" Margin="0,12,0,12" Style="{StaticResource SurfaceStyle}" Padding="12">
             <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-
-                <TextBlock Grid.Row="0" Grid.Column="0" Margin="0,0,10,0" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="#334155" Text="共享地址" />
-                <TextBox x:Name="ServerAddressInputTextBox"
-                         Grid.Row="0"
-                         Grid.Column="1"
-                         Height="34"
-                         VerticalContentAlignment="Center"
-                         IsEnabled="{Binding IsServerAddressInputEnabled}"
-                         Text="{Binding ServerAddressInput, UpdateSourceTrigger=PropertyChanged}"
-                         KeyDown="ServerAddressInputTextBox_KeyDown" />
-                <Button Grid.Row="0" Grid.Column="2" Style="{StaticResource PrimaryButtonStyle}" Command="{Binding ConnectToServerCommand}" Content="连接" />
-                <Button Grid.Row="0" Grid.Column="3" Style="{StaticResource ToolbarButtonStyle}" Command="{Binding DiscoverServersCommand}" Content="发现" />
-                <Button Grid.Row="0" Grid.Column="4" Style="{StaticResource ToolbarButtonStyle}" Command="{Binding BrowseSelectedServerCommand}" Content="刷新" />
-
-                <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="4" Margin="0,12,0,0" Orientation="Horizontal">
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
                     <Button Style="{StaticResource ToolbarButtonStyle}" Command="{Binding NavigateUpCommand}" Content="返回上级" />
                     <Button Style="{StaticResource ToolbarButtonStyle}" Command="{Binding OpenSelectedDirectoryCommand}" Content="进入目录" />
                     <Button Style="{StaticResource ToolbarButtonStyle}" Command="{Binding UploadToSelectedDirectoryCommand}" Content="上传文件" />
-                    <Button Style="{StaticResource ToolbarButtonStyle}" Command="{Binding DownloadSelectedItemCommand}" Content="下载文件" />
+                    <Button Style="{StaticResource ToolbarButtonStyle}" Command="{Binding DownloadSelectedItemCommand}" Content="下载" />
                     <Button Style="{StaticResource ToolbarButtonStyle}" Command="{Binding DeleteSelectedEntryCommand}" Content="删除" />
                     <Grid Margin="10,0,0,0">
                         <Grid.ColumnDefinitions>
@@ -126,6 +106,11 @@
                                 Content="浏览下载目录" />
                     </Grid>
                 </StackPanel>
+                <Button Grid.Column="1"
+                        Margin="12,0,0,0"
+                        Style="{StaticResource ToolbarButtonStyle}"
+                        Command="{Binding BrowseSelectedServerCommand}"
+                        Content="{Binding RefreshButtonText}" />
             </Grid>
         </Border>
 

@@ -209,6 +209,24 @@
 
                         <TextBlock Margin="0,18,0,0" FontWeight="SemiBold" Foreground="#0F172A" Text="{Binding SharedPathPreviewTitle}" />
                         <TextBlock Margin="0,4,0,0" Foreground="#64748B" Text="单击文件或文件夹即可把相对路径填入上方输入框，根目录用 / 表示。" />
+                        <Grid Margin="0,10,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="0"
+                                    Style="{StaticResource ToolbarButtonStyle}"
+                                    Command="{Binding NavigateUpSharedPathCommand}"
+                                    Content="返回上级" />
+                            <TextBox Grid.Column="2"
+                                     Height="34"
+                                     VerticalContentAlignment="Center"
+                                     Text="{Binding SharedPathSearchText, UpdateSourceTrigger=PropertyChanged}" />
+                        </Grid>
+                        <TextBlock Margin="0,8,0,0"
+                                   Foreground="#64748B"
+                                   Text="{Binding CurrentSharedBrowseDisplay, StringFormat=当前目录：{0}}" />
                         <DataGrid Margin="0,10,0,0"
                                   Height="260"
                                   BorderBrush="#D7DBE2"
@@ -217,7 +235,8 @@
                                   GridLinesVisibility="Horizontal"
                                   HeadersVisibility="Column"
                                   ItemsSource="{Binding SharedPaths}"
-                                  SelectedItem="{Binding SelectedSharedPath}">
+                                  SelectedItem="{Binding SelectedSharedPath}"
+                                  MouseDoubleClick="SharedPathsDataGrid_MouseDoubleClick">
                             <DataGrid.Columns>
                                 <DataGridTemplateColumn Width="*" Header="名称">
                                     <DataGridTemplateColumn.CellTemplate>

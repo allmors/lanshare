@@ -1,8 +1,10 @@
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using LanShare.Models;
 
 namespace LanShare.Services.Client;
@@ -11,6 +13,10 @@ public sealed class FileShareClientService : IFileShareClientService
 {
     private const int BufferSize = 1024 * 128;
     private const string ClientNameHeader = "X-LanShare-ClientName";
+    private static readonly string ClientDirectoryDownloadLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "LanShare.Client",
+        "directory-download-client.log");
 
     private readonly HttpClient _httpClient = new(new HttpClientHandler())
     {
@@ -31,7 +37,7 @@ public sealed class FileShareClientService : IFileShareClientService
         return result ?? new BrowseResult();
     }
 
-    public async Task DownloadFileAsync(
+    public async Task DownloadEntryAsync(
         DiscoveredServer server,
         BrowseEntry entry,
         string targetFolder,
@@ -39,6 +45,12 @@ public sealed class FileShareClientService : IFileShareClientService
         CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(targetFolder);
+
+        if (entry.IsDirectory)
+        {
+            await DownloadDirectoryAsync(server, entry, targetFolder, progress, cancellationToken);
+            return;
+        }
 
         var uri = $"{server.BaseAddress}/api/download?user=guest&path={Uri.EscapeDataString(entry.RelativePath)}";
         var filePath = Path.Combine(targetFolder, entry.Name);
@@ -149,6 +161,161 @@ public sealed class FileShareClientService : IFileShareClientService
         using var request = CreateRequest(HttpMethod.Post, uri);
         using var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
+    }
+
+    private async Task DownloadDirectoryAsync(
+        DiscoveredServer server,
+        BrowseEntry entry,
+        string targetFolder,
+        IProgress<TransferProgressInfo>? progress,
+        CancellationToken cancellationToken)
+    {
+        var uri = $"{server.BaseAddress}/api/download-directory?user=guest&path={Uri.EscapeDataString(entry.RelativePath)}";
+        var archivePath = Path.Combine(Path.GetTempPath(), $"LanShare-{Guid.NewGuid():N}.zip");
+        var extractRoot = GetUniqueDirectoryPath(targetFolder, entry.Name);
+
+        try
+        {
+            using var request = CreateRequest(HttpMethod.Get, uri);
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
+
+            var totalBytes = response.Content.Headers.ContentLength;
+            await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken))
+            await using (var destination = File.Create(archivePath))
+            {
+                await CopyStreamWithProgressAsync(
+                    source,
+                    destination,
+                    totalBytes,
+                    bytesTransferred => progress?.Report(new TransferProgressInfo
+                    {
+                        Operation = "下载",
+                        FileName = entry.Name,
+                        BytesTransferred = bytesTransferred,
+                        TotalBytes = totalBytes,
+                        FileIndex = 1,
+                        FileCount = 1,
+                        IsCompleted = false
+                    }),
+                    cancellationToken);
+            }
+
+            Directory.CreateDirectory(extractRoot);
+            try
+            {
+                ZipFile.ExtractToDirectory(archivePath, extractRoot, overwriteFiles: false);
+            }
+            catch (Exception ex)
+            {
+                LogClientDirectoryDownloadFailure(server, entry, archivePath, extractRoot, ex);
+                throw new IOException($"目录下载后解压失败：{entry.Name}。{ex.Message}", ex);
+            }
+
+            progress?.Report(new TransferProgressInfo
+            {
+                Operation = "下载",
+                FileName = entry.Name,
+                BytesTransferred = totalBytes ?? new FileInfo(archivePath).Length,
+                TotalBytes = totalBytes,
+                FileIndex = 1,
+                FileCount = 1,
+                IsCompleted = true
+            });
+        }
+        finally
+        {
+            if (File.Exists(archivePath))
+            {
+                File.Delete(archivePath);
+            }
+        }
+    }
+
+    private static void LogClientDirectoryDownloadFailure(
+        DiscoveredServer server,
+        BrowseEntry entry,
+        string archivePath,
+        string extractRoot,
+        Exception exception)
+    {
+        try
+        {
+            var logDirectory = Path.GetDirectoryName(ClientDirectoryDownloadLogPath);
+            if (!string.IsNullOrWhiteSpace(logDirectory))
+            {
+                Directory.CreateDirectory(logDirectory);
+            }
+
+            var message = string.Join(
+                Environment.NewLine,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 客户端目录解压失败",
+                $"服务端: {server.BaseAddress}",
+                $"目录: {entry.RelativePath}",
+                $"临时压缩包: {archivePath}",
+                $"解压目标: {extractRoot}",
+                $"异常类型: {exception.GetType().FullName}",
+                $"异常消息: {exception.Message}",
+                exception.StackTrace ?? string.Empty,
+                new string('-', 80));
+
+            File.AppendAllText(ClientDirectoryDownloadLogPath, message + Environment.NewLine, System.Text.Encoding.UTF8);
+        }
+        catch
+        {
+        }
+    }
+
+    private static async Task EnsureSuccessStatusCodeWithDetailsAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode)
+        {
+            return;
+        }
+
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                if (document.RootElement.TryGetProperty("detail", out var detailElement))
+                {
+                    var detail = detailElement.GetString();
+                    if (!string.IsNullOrWhiteSpace(detail))
+                    {
+                        throw new HttpRequestException(detail, null, response.StatusCode);
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+            }
+
+            throw new HttpRequestException(body, null, response.StatusCode);
+        }
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    private static string GetUniqueDirectoryPath(string targetFolder, string directoryName)
+    {
+        var candidate = Path.Combine(targetFolder, directoryName);
+        if (!Directory.Exists(candidate) && !File.Exists(candidate))
+        {
+            return candidate;
+        }
+
+        for (var index = 1; index < 1000; index++)
+        {
+            candidate = Path.Combine(targetFolder, $"{directoryName} ({index})");
+            if (!Directory.Exists(candidate) && !File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new IOException($"无法为目录 '{directoryName}' 找到可用的下载位置。");
     }
 
     private static HttpRequestMessage CreateRequest(HttpMethod method, string uri)

@@ -70,7 +70,7 @@ public sealed class ClientViewModel : BindableBase
             HandleError);
         DownloadSelectedItemCommand = new AsyncRelayCommand(
             DownloadSelectedItemAsync,
-            () => SelectedServer is not null && SelectedEntry is not null && !SelectedEntry.IsDirectory && !IsTransferActive,
+            () => SelectedServer is not null && SelectedEntry is not null && !IsTransferActive,
             HandleError);
         OpenSelectedDirectoryCommand = new AsyncRelayCommand(
             OpenSelectedDirectoryAsync,
@@ -152,8 +152,9 @@ public sealed class ClientViewModel : BindableBase
                 MarkActiveServer(value);
                 ResetCurrentBrowseState();
                 UpdateBuiltInServerConnectionState(value);
-                ClientStatus = value is null ? "等待连接共享服务" : $"已选中 {value.ServerName}";
+                ClientStatus = value is null ? "等待连接共享服务" : "已连接共享服务";
                 _statusCallback(ClientStatus);
+                RaisePropertyChanged(nameof(RefreshButtonText));
                 RaiseCommandStates();
             }
         }
@@ -241,6 +242,8 @@ public sealed class ClientViewModel : BindableBase
         get => _transferTitle;
         private set => SetProperty(ref _transferTitle, value);
     }
+
+    public string RefreshButtonText => SelectedServer is null ? "重试" : "刷新";
 
     public AsyncRelayCommand ConnectToServerCommand { get; }
 
@@ -331,7 +334,7 @@ public sealed class ClientViewModel : BindableBase
         IsBuiltInServerConnected = false;
 
         var connectTimeoutSeconds = Math.Max(2, _config.Discovery.DiscoveryTimeoutSeconds);
-        ClientStatus = $"正在连接内置服务地址：{builtInAddress}";
+        ClientStatus = "正在连接共享服务...";
         _statusCallback(ClientStatus);
 
         if (await TryConnectToAddressAsync(builtInAddress, connectTimeoutSeconds))
@@ -357,7 +360,7 @@ public sealed class ClientViewModel : BindableBase
     {
         if (IsBuiltInServerConnected)
         {
-            ClientStatus = "当前已连接内置服务地址，无需再次发现。";
+            ClientStatus = "当前已连接共享服务，无需再次发现。";
             _statusCallback(ClientStatus);
             return;
         }
@@ -398,7 +401,7 @@ public sealed class ClientViewModel : BindableBase
         {
             if (await TryConnectToDiscoveredServerAsync(server, Math.Max(2, _config.Discovery.DiscoveryTimeoutSeconds)))
             {
-                ClientStatus = $"已自动连接到 {server.ServerName}";
+                ClientStatus = "已自动连接到共享服务";
                 _statusCallback(ClientStatus);
                 return;
             }
@@ -414,6 +417,7 @@ public sealed class ClientViewModel : BindableBase
     {
         if (SelectedServer is null)
         {
+            await ConnectBuiltInServerThenDiscoverAsync();
             return;
         }
 
@@ -639,13 +643,13 @@ public sealed class ClientViewModel : BindableBase
         var result = await _fileShareClientService.BrowseAsync(SelectedServer, CurrentRelativePath);
         ApplyBrowseResult(result, CurrentRelativePath);
 
-        ClientStatus = $"已连接 {SelectedServer.ServerName}，当前目录 {CurrentPathDisplay}";
+        ClientStatus = $"已连接共享服务，当前目录 {CurrentPathDisplay}";
         _statusCallback(ClientStatus);
     }
 
     private async Task DownloadSelectedItemAsync()
     {
-        if (SelectedServer is null || SelectedEntry is null || SelectedEntry.IsDirectory)
+        if (SelectedServer is null || SelectedEntry is null)
         {
             return;
         }
@@ -656,10 +660,12 @@ public sealed class ClientViewModel : BindableBase
 
         DownloadFolder = targetFolder;
 
-        BeginTransfer("准备下载文件...", false);
+        BeginTransfer(SelectedEntry.IsDirectory ? "准备下载目录..." : "准备下载文件...", false);
         var progress = new Progress<TransferProgressInfo>(UpdateTransferProgress);
-        await _fileShareClientService.DownloadFileAsync(SelectedServer, SelectedEntry, targetFolder, progress);
-        CompleteTransfer($"文件已下载到 {targetFolder}");
+        await _fileShareClientService.DownloadEntryAsync(SelectedServer, SelectedEntry, targetFolder, progress);
+        CompleteTransfer(SelectedEntry.IsDirectory
+            ? $"目录已下载到 {targetFolder}"
+            : $"文件已下载到 {targetFolder}");
     }
 
     private void BrowseDownloadFolder()
@@ -827,8 +833,8 @@ public sealed class ClientViewModel : BindableBase
         UpdateBuiltInServerConnectionState(target.Server);
 
         var status = string.IsNullOrWhiteSpace(target.InitialRelativePath)
-            ? $"已连接到 {target.Server.ServerName}"
-            : $"已连接到 {target.Server.ServerName}，已打开目录 {CurrentPathDisplay}";
+            ? "已连接到共享服务"
+            : $"已连接到共享服务，已打开目录 {CurrentPathDisplay}";
 
         ClientStatus = status;
         _statusCallback(status);

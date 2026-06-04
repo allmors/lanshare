@@ -12,7 +12,7 @@ public interface IFileShareClientService
         string relativePath,
         CancellationToken cancellationToken = default);
 
-    Task DownloadFileAsync(
+    Task DownloadEntryAsync(
         DiscoveredServer server,
         BrowseEntry entry,
         string targetFolder,
