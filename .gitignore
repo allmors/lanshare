@@ -1,0 +1,45 @@
+# Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+[Bb]in/
+[Oo]bj/
+artifacts/
+_verify/
+
+# Publish and packaged artifacts
+publish/
+dist/
+*.zip
+*.exe
+*.msi
+
+# Logs
+*.log
+*.tmp
+*.cache
+
+# Test / coverage
+TestResults/
+*.trx
+coverage/
+*.coverage
+*.coveragexml
+
+# NuGet
+packages/
+*.nupkg
+*.snupkg
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Generated config/user state
+*.generated.cs

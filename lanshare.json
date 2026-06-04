@@ -1,0 +1,57 @@
+{
+  "StartupMode": 0,
+  "Server": {
+    "ServerName": "局域网共享-服务端",
+    "SharedFolderPath": "",
+    "ServicePort": 49443
+  },
+  "Discovery": {
+    "DiscoveryPort": 49450,
+    "BroadcastIntervalSeconds": 5,
+    "DiscoveryTimeoutSeconds": 3
+  },
+  "Client": {
+    "DownloadFolder": "",
+    "BuiltInServerHost": "192.168.202.163",
+    "BuiltInServerPort": 49443,
+    "PreferredServerAddress": "",
+    "AutoConnectPreferredServerOnStartup": true
+  },
+  "Permissions": {
+    "Users": [
+      {
+        "UserName": "admin",
+        "DisplayName": "Administrator",
+        "IsEnabled": true
+      },
+      {
+        "UserName": "guest",
+        "DisplayName": "Guest",
+        "IsEnabled": true
+      }
+    ],
+    "Rules": [
+      {
+        "UserName": "admin",
+        "DirectoryPath": "",
+        "Effect": "Allow",
+        "Permissions": "Read, Write, Delete",
+        "InheritToChildren": true
+      },
+      {
+        "UserName": "guest",
+        "DirectoryPath": "",
+        "Effect": "Allow",
+        "Permissions": "Read",
+        "InheritToChildren": true
+      },
+      {
+        "UserName": "guest",
+        "DirectoryPath": "private",
+        "Effect": "Deny",
+        "Permissions": "Read",
+        "InheritToChildren": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+namespace LanShare.Models;
+
+public sealed class ServerConfig
+{
+    public string ServerName { get; set; } = "局域网共享-服务端";
+
+    public string SharedFolderPath { get; set; } = string.Empty;
+
+    public int ServicePort { get; set; } = 49443;
+}

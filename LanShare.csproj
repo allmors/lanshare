@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\LanShare.ico</ApplicationIcon>
+    <AssemblyTitle>LanShare</AssemblyTitle>
+    <Product>LanShare</Product>
+    <Company>Escher1108</Company>
+    <Authors>Escher1108</Authors>
+    <Description>局域网传输助手，打满带宽，眨眼的功夫就完成传输</Description>
+    <Version>0.01.0</Version>
+    <FileVersion>0.01.0.0</FileVersion>
+    <AssemblyVersion>0.01.0.0</AssemblyVersion>
+    <InformationalVersion>0.01</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>Contact</_Parameter1>
+      <_Parameter2>contact@vcode.online</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="artifacts\**\*.cs" />
+    <Compile Remove="LanShare.Client\**\*.cs" />
+    <Compile Remove="LanShare.Server\**\*.cs" />
+    <EmbeddedResource Remove="artifacts\**\*" />
+    <EmbeddedResource Remove="LanShare.Client\**\*" />
+    <EmbeddedResource Remove="LanShare.Server\**\*" />
+    <None Remove="artifacts\**\*" />
+    <None Remove="LanShare.Client\**\*" />
+    <None Remove="LanShare.Server\**\*" />
+    <Page Remove="artifacts\**\*" />
+    <Page Remove="LanShare.Client\**\*" />
+    <Page Remove="LanShare.Server\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="lanshare.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <Resource Include="Assets\LanShare.ico" />
+    <Content Include="Assets\LanShare.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

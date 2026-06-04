@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>LanShare</RootNamespace>
+    <AssemblyName>LanShare.Client</AssemblyName>
+    <ApplicationIcon>..\Assets\LanShare.ico</ApplicationIcon>
+    <AssemblyTitle>局域网共享-客户端</AssemblyTitle>
+    <Product>LanShare</Product>
+    <Company>Escher1108</Company>
+    <Authors>Escher1108</Authors>
+    <Description>局域网共享客户端</Description>
+    <Version>0.01.0</Version>
+    <FileVersion>0.01.0.0</FileVersion>
+    <AssemblyVersion>0.01.0.0</AssemblyVersion>
+    <InformationalVersion>0.01</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Infrastructure\*.cs" LinkBase="Infrastructure" />
+    <Compile Include="..\Models\*.cs" LinkBase="Models" />
+    <Compile Include="..\Services\**\*.cs" LinkBase="Services" />
+    <Compile Include="..\ViewModels\ClientViewModel.cs" Link="ViewModels\ClientViewModel.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\lanshare.json" Link="lanshare.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <Resource Include="..\Assets\LanShare.ico" Link="Assets\LanShare.ico" />
+    <Content Include="..\Assets\LanShare.ico" Link="Assets\LanShare.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>
