@@ -361,6 +361,8 @@ public sealed class ServerViewModel : BindableBase
             ServicePort = ServicePort,
             DiscoveryPort = DiscoveryPort,
             BroadcastIntervalSeconds = _config.Discovery.BroadcastIntervalSeconds,
+            MaxConcurrentDirectoryDownloads = _config.Server.MaxConcurrentDirectoryDownloads,
+            MaxConcurrentUploads = _config.Server.MaxConcurrentUploads,
             Permissions = _config.Permissions
         };
 

@@ -17,7 +17,9 @@ public sealed class FileShareServerService : IFileShareServerService
 {
     private const string ClientNameHeader = "X-LanShare-ClientName";
     private readonly FileExtensionContentTypeProvider _contentTypeProvider = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _pathSemaphores = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ConnectedClientInfo> _recentClients = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, int> _activeDirectoryDownloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly IPermissionService _permissionService;
     private readonly string _diagnosticLogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -27,6 +29,8 @@ public sealed class FileShareServerService : IFileShareServerService
     private WebApplication? _webApplication;
     private string? _sharedFolderPath;
     private PermissionConfig _permissionConfig = new();
+    private SemaphoreSlim _directoryDownloadLimiter = new(4, 4);
+    private SemaphoreSlim _uploadLimiter = new(8, 8);
 
     public FileShareServerService()
         : this(new PermissionService())
@@ -45,6 +49,10 @@ public sealed class FileShareServerService : IFileShareServerService
     public async Task StartAsync(ServerStartOptions options, CancellationToken cancellationToken = default)
     {
         await StopAsync(cancellationToken);
+        var maxConcurrentDirectoryDownloads = Math.Max(1, options.MaxConcurrentDirectoryDownloads);
+        var maxConcurrentUploads = Math.Max(1, options.MaxConcurrentUploads);
+        _directoryDownloadLimiter = new SemaphoreSlim(maxConcurrentDirectoryDownloads, maxConcurrentDirectoryDownloads);
+        _uploadLimiter = new SemaphoreSlim(maxConcurrentUploads, maxConcurrentUploads);
         LogDirectoryDownloadTrace("服务端启动", $"sharedFolder={options.SharedFolderPath}, servicePort={options.ServicePort}, discoveryPort={options.DiscoveryPort}");
 
         _sharedFolderPath = options.SharedFolderPath;
@@ -139,6 +147,7 @@ public sealed class FileShareServerService : IFileShareServerService
                 context.Response.Headers.ContentDisposition = contentDisposition.ToString();
                 LogDirectoryDownloadTrace("开始打包目录", $"relativePath={relativePath}, fullPath={fullPath}");
 
+                using var downloadLease = await AcquireDirectoryDownloadLeaseAsync(relativePath, token);
                 using var archive = new ZipArchive(context.Response.Body, ZipArchiveMode.Create, leaveOpen: true);
                 await WriteDirectoryToArchiveAsync(archive, effectiveUser, fullPath, token);
                 LogDirectoryDownloadTrace("目录打包完成", $"relativePath={relativePath}, fullPath={fullPath}");
@@ -179,6 +188,11 @@ public sealed class FileShareServerService : IFileShareServerService
                 return Results.BadRequest("Target directory does not exist.");
             }
 
+            if (HasActiveDirectoryDownloadConflict(relativePath))
+            {
+                return Results.Conflict("The target directory is currently being downloaded. Please try again later.");
+            }
+
             if (!request.HasFormContentType)
             {
                 return Results.BadRequest("Multipart form-data is required.");
@@ -191,6 +205,10 @@ public sealed class FileShareServerService : IFileShareServerService
                 return Results.BadRequest("No files were uploaded.");
             }
 
+            await _uploadLimiter.WaitAsync(token);
+            try
+            {
+                using var uploadLock = await AcquirePathLockAsync(relativePath, token);
             foreach (var file in files)
             {
                 if (file.Length <= 0)
@@ -210,11 +228,15 @@ public sealed class FileShareServerService : IFileShareServerService
                     return Results.Conflict($"File already exists: {safeFileName}");
                 }
 
-                await using var targetStream = File.Create(destinationPath);
+                await using var targetStream = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 await using var sourceStream = file.OpenReadStream();
                 await sourceStream.CopyToAsync(targetStream, token);
             }
-
+            }
+            finally
+            {
+                _uploadLimiter.Release();
+            }
             return Results.Ok();
         });
 
@@ -234,11 +256,18 @@ public sealed class FileShareServerService : IFileShareServerService
                 return Results.Forbid();
             }
 
+            if (HasActiveDirectoryDownloadConflict(relativePath))
+            {
+                return Results.Conflict("The target path is currently involved in an active directory download.");
+            }
+
             var fullPath = ResolvePath(relativePath);
             if (fullPath is null)
             {
                 return Results.BadRequest("Invalid path.");
             }
+
+            using var deleteLock = AcquirePathLock(relativePath);
 
             if (File.Exists(fullPath))
             {
@@ -273,12 +302,18 @@ public sealed class FileShareServerService : IFileShareServerService
                 return Results.Forbid();
             }
 
+            if (HasActiveDirectoryDownloadConflict(parentRelativePath))
+            {
+                return Results.Conflict("The target directory is currently being downloaded. Please try again later.");
+            }
+
             var targetDirectory = ResolvePath(parentRelativePath);
             if (targetDirectory is null || !Directory.Exists(targetDirectory))
             {
                 return Results.BadRequest("Target directory does not exist.");
             }
 
+            using var folderLock = AcquirePathLock(parentRelativePath);
             var destinationPath = Path.Combine(targetDirectory, folderName);
             if (Directory.Exists(destinationPath) || File.Exists(destinationPath))
             {
@@ -305,6 +340,8 @@ public sealed class FileShareServerService : IFileShareServerService
         _webApplication = null;
         BaseAddress = null;
         _recentClients.Clear();
+        _activeDirectoryDownloads.Clear();
+        _pathSemaphores.Clear();
     }
 
     public Task<BrowseResult> BrowseAsync(
@@ -463,6 +500,83 @@ public sealed class FileShareServerService : IFileShareServerService
         }
     }
 
+    private async Task<IDisposable> AcquireDirectoryDownloadLeaseAsync(string relativePath, CancellationToken cancellationToken)
+    {
+        await _directoryDownloadLimiter.WaitAsync(cancellationToken);
+        try
+        {
+            return RegisterActiveDirectoryDownload(relativePath);
+        }
+        catch
+        {
+            _directoryDownloadLimiter.Release();
+            throw;
+        }
+    }
+
+    private async Task<IDisposable> AcquirePathLockAsync(string relativePath, CancellationToken cancellationToken)
+    {
+        var key = BuildLockKey(relativePath);
+        var semaphore = _pathSemaphores.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync(cancellationToken);
+        return new SemaphoreReleaser(semaphore);
+    }
+
+    private IDisposable AcquirePathLock(string relativePath)
+    {
+        var key = BuildLockKey(relativePath);
+        var semaphore = _pathSemaphores.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        semaphore.Wait();
+        return new SemaphoreReleaser(semaphore);
+    }
+
+    private IDisposable RegisterActiveDirectoryDownload(string relativePath)
+    {
+        var key = NormalizeRelativePath(relativePath);
+        _activeDirectoryDownloads.AddOrUpdate(key, 1, (_, count) => count + 1);
+        return new ActiveDirectoryDownloadReleaser(this, key);
+    }
+
+    private void ReleaseActiveDirectoryDownload(string relativePath)
+    {
+        _activeDirectoryDownloads.AddOrUpdate(
+            relativePath,
+            0,
+            (_, count) => count > 0 ? count - 1 : 0);
+
+        if (_activeDirectoryDownloads.TryGetValue(relativePath, out var count) && count <= 0)
+        {
+            _activeDirectoryDownloads.TryRemove(relativePath, out _);
+        }
+    }
+
+    private bool HasActiveDirectoryDownloadConflict(string relativePath)
+    {
+        var normalizedPath = NormalizeRelativePath(relativePath);
+        return _activeDirectoryDownloads.Keys.Any(activePath => PathsOverlap(normalizedPath, activePath));
+    }
+
+    private static string BuildLockKey(string relativePath)
+    {
+        var normalizedPath = NormalizeRelativePath(relativePath);
+        return string.IsNullOrWhiteSpace(normalizedPath) ? "/" : normalizedPath;
+    }
+
+    private static bool PathsOverlap(string left, string right)
+    {
+        var normalizedLeft = NormalizeRelativePath(left);
+        var normalizedRight = NormalizeRelativePath(right);
+
+        if (string.IsNullOrWhiteSpace(normalizedLeft) || string.IsNullOrWhiteSpace(normalizedRight))
+        {
+            return true;
+        }
+
+        return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase)
+            || normalizedLeft.StartsWith(normalizedRight + "/", StringComparison.OrdinalIgnoreCase)
+            || normalizedRight.StartsWith(normalizedLeft + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
     private void LogDirectoryDownloadFailure(string requestedRelativePath, string failedPath, Exception exception)
     {
         try
@@ -522,6 +636,53 @@ public sealed class FileShareServerService : IFileShareServerService
         }
 
         public string FailedPath { get; }
+    }
+
+    private sealed class SemaphoreReleaser : IDisposable
+    {
+        private readonly SemaphoreSlim _semaphore;
+        private bool _disposed;
+
+        public SemaphoreReleaser(SemaphoreSlim semaphore)
+        {
+            _semaphore = semaphore;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _semaphore.Release();
+        }
+    }
+
+    private sealed class ActiveDirectoryDownloadReleaser : IDisposable
+    {
+        private readonly FileShareServerService _owner;
+        private readonly string _relativePath;
+        private bool _disposed;
+
+        public ActiveDirectoryDownloadReleaser(FileShareServerService owner, string relativePath)
+        {
+            _owner = owner;
+            _relativePath = relativePath;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _owner.ReleaseActiveDirectoryDownload(_relativePath);
+            _owner._directoryDownloadLimiter.Release();
+        }
     }
 
     private string? ResolvePath(string relativePath)

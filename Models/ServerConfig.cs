@@ -7,4 +7,8 @@ public sealed class ServerConfig
     public string SharedFolderPath { get; set; } = string.Empty;
 
     public int ServicePort { get; set; } = 49443;
+
+    public int MaxConcurrentDirectoryDownloads { get; set; } = 4;
+
+    public int MaxConcurrentUploads { get; set; } = 8;
 }

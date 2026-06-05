@@ -12,5 +12,9 @@ public sealed class ServerStartOptions
 
     public int BroadcastIntervalSeconds { get; set; }
 
+    public int MaxConcurrentDirectoryDownloads { get; set; } = 4;
+
+    public int MaxConcurrentUploads { get; set; } = 8;
+
     public PermissionConfig Permissions { get; set; } = new();
 }
