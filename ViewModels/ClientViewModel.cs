@@ -25,6 +25,7 @@ public sealed class ClientViewModel : BindableBase
     private readonly IServiceDiscoveryClient _discoveryClient;
     private readonly IFileShareClientService _fileShareClientService;
     private readonly Action<string> _statusCallback;
+    private CancellationTokenSource? _transferCancellationTokenSource;
 
     private DiscoveredServer? _selectedServer;
     private BrowseEntry? _selectedEntry;
@@ -95,6 +96,7 @@ public sealed class ClientViewModel : BindableBase
             () => SelectedServer is not null && CurrentDirectoryCanWrite && !IsTransferActive,
             HandleError);
         BrowseDownloadFolderCommand = new RelayCommand(BrowseDownloadFolder);
+        CancelTransferCommand = new RelayCommand(CancelTransfer, () => IsTransferActive);
     }
 
     public ObservableCollection<DiscoveredServer> Servers { get; } = new();
@@ -266,6 +268,8 @@ public sealed class ClientViewModel : BindableBase
     public AsyncRelayCommand CreateFolderCommand { get; }
 
     public RelayCommand BrowseDownloadFolderCommand { get; }
+
+    public RelayCommand CancelTransferCommand { get; }
 
     public async Task InitializeAsync()
     {
@@ -541,7 +545,9 @@ public sealed class ClientViewModel : BindableBase
             throw new InvalidOperationException("没有找到可上传的文件。");
         }
 
-        var duplicateFiles = await CollectDuplicateFilesAsync(SelectedServer, uploadPlan);
+        var cancellationToken = BeginTransfer("准备上传文件...", false);
+
+        var duplicateFiles = await CollectDuplicateFilesAsync(SelectedServer, uploadPlan, cancellationToken);
         if (duplicateFiles.Count == uploadPlan.FileCount)
         {
             throw new InvalidOperationException("检测到上传文件全部已存在，已取消上传。");
@@ -565,12 +571,12 @@ public sealed class ClientViewModel : BindableBase
 
         var targetLabel = string.IsNullOrWhiteSpace(CurrentRelativePath) ? "共享根目录" : CurrentRelativePath;
 
-        BeginTransfer("准备上传文件...", false);
         var progress = new Progress<TransferProgressInfo>(UpdateTransferProgress);
 
         foreach (var directoryPath in uploadPlan.DirectoriesToEnsure)
         {
-            await EnsureRemoteDirectoryExistsAsync(SelectedServer, directoryPath);
+            cancellationToken.ThrowIfCancellationRequested();
+            await EnsureRemoteDirectoryExistsAsync(SelectedServer, directoryPath, cancellationToken);
         }
 
         var uploadedFileCount = 0;
@@ -585,10 +591,17 @@ public sealed class ClientViewModel : BindableBase
                 continue;
             }
 
-            await _fileShareClientService.UploadFilesAsync(SelectedServer, batch.TargetRelativePath, filesToUpload, progress);
+            cancellationToken.ThrowIfCancellationRequested();
+            await _fileShareClientService.UploadFilesAsync(
+                SelectedServer,
+                batch.TargetRelativePath,
+                filesToUpload,
+                progress,
+                cancellationToken);
             uploadedFileCount += filesToUpload.Length;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         await LoadEntriesAsync(CurrentRelativePath);
         CompleteTransfer(
             duplicateFiles.Count > 0
@@ -681,14 +694,14 @@ public sealed class ClientViewModel : BindableBase
         }
 
         var targetFolder = string.IsNullOrWhiteSpace(DownloadFolder)
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "LanShare")
+            ? GetDefaultDownloadFolder()
             : DownloadFolder;
 
         DownloadFolder = targetFolder;
 
-        BeginTransfer(SelectedEntry.IsDirectory ? "准备下载目录..." : "准备下载文件...", false);
+        var cancellationToken = BeginTransfer(SelectedEntry.IsDirectory ? "准备下载目录..." : "准备下载文件...", false);
         var progress = new Progress<TransferProgressInfo>(UpdateTransferProgress);
-        await _fileShareClientService.DownloadEntryAsync(SelectedServer, SelectedEntry, targetFolder, progress);
+        await _fileShareClientService.DownloadEntryAsync(SelectedServer, SelectedEntry, targetFolder, progress, cancellationToken);
         CompleteTransfer(SelectedEntry.IsDirectory
             ? $"目录已下载到 {targetFolder}"
             : $"文件已下载到 {targetFolder}");
@@ -701,7 +714,7 @@ public sealed class ClientViewModel : BindableBase
             Description = "选择默认下载目录",
             ShowNewFolderButton = true,
             SelectedPath = string.IsNullOrWhiteSpace(DownloadFolder)
-                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "LanShare")
+                ? GetDefaultDownloadFolder()
                 : DownloadFolder
         };
 
@@ -717,6 +730,14 @@ public sealed class ClientViewModel : BindableBase
 
     private void HandleError(Exception ex)
     {
+        if (ex is OperationCanceledException)
+        {
+            EndTransferAsCanceled();
+            ClientStatus = "已取消当前传输";
+            _statusCallback(ClientStatus);
+            return;
+        }
+
         EndTransferAfterFailure();
         ClientStatus = $"操作失败：{BuildUserFriendlyErrorMessage(ex)}";
         _statusCallback(ClientStatus);
@@ -754,19 +775,24 @@ public sealed class ClientViewModel : BindableBase
         DeleteSelectedEntryCommand.RaiseCanExecuteChanged();
         CreateFolderCommand.RaiseCanExecuteChanged();
         DiscoverServersCommand.RaiseCanExecuteChanged();
+        CancelTransferCommand.RaiseCanExecuteChanged();
     }
 
-    private void BeginTransfer(string title, bool indeterminate)
+    private CancellationToken BeginTransfer(string title, bool indeterminate)
     {
+        DisposeTransferCancellationTokenSource();
+        _transferCancellationTokenSource = new CancellationTokenSource();
         IsTransferActive = true;
         TransferTitle = title;
         IsTransferIndeterminate = indeterminate;
         TransferProgressValue = 0;
         TransferProgressText = indeterminate ? "传输中..." : "0%";
+        return _transferCancellationTokenSource.Token;
     }
 
     private void CompleteTransfer(string statusMessage)
     {
+        DisposeTransferCancellationTokenSource();
         IsTransferActive = false;
         IsTransferIndeterminate = false;
         TransferProgressValue = 100;
@@ -778,9 +804,19 @@ public sealed class ClientViewModel : BindableBase
 
     private void EndTransferAfterFailure()
     {
+        DisposeTransferCancellationTokenSource();
         IsTransferActive = false;
         IsTransferIndeterminate = false;
         TransferTitle = "传输已中断";
+    }
+
+    private void EndTransferAsCanceled()
+    {
+        DisposeTransferCancellationTokenSource();
+        IsTransferActive = false;
+        IsTransferIndeterminate = false;
+        TransferTitle = "传输已取消";
+        TransferProgressText = "已取消";
     }
 
     private void UpdateTransferProgress(TransferProgressInfo progress)
@@ -1051,13 +1087,14 @@ public sealed class ClientViewModel : BindableBase
         files.Add(filePath);
     }
 
-    private async Task<HashSet<string>> CollectDuplicateFilesAsync(DiscoveredServer server, UploadPlan uploadPlan)
+    private async Task<HashSet<string>> CollectDuplicateFilesAsync(DiscoveredServer server, UploadPlan uploadPlan, CancellationToken cancellationToken)
     {
         var duplicates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var batch in uploadPlan.Batches)
         {
-            var remoteEntries = await _fileShareClientService.BrowseAsync(server, batch.TargetRelativePath);
+            cancellationToken.ThrowIfCancellationRequested();
+            var remoteEntries = await _fileShareClientService.BrowseAsync(server, batch.TargetRelativePath, cancellationToken);
             var remoteNames = remoteEntries.Entries
                 .Select(entry => entry.Name)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -1075,7 +1112,7 @@ public sealed class ClientViewModel : BindableBase
         return duplicates;
     }
 
-    private async Task EnsureRemoteDirectoryExistsAsync(DiscoveredServer server, string directoryPath)
+    private async Task EnsureRemoteDirectoryExistsAsync(DiscoveredServer server, string directoryPath, CancellationToken cancellationToken)
     {
         var normalizedPath = NormalizeRelativePath(directoryPath);
         if (string.IsNullOrWhiteSpace(normalizedPath))
@@ -1085,7 +1122,7 @@ public sealed class ClientViewModel : BindableBase
 
         var parentPath = GetParentRelativePath(normalizedPath);
         var folderName = normalizedPath.Split('/').Last();
-        var parentEntries = await _fileShareClientService.BrowseAsync(server, parentPath);
+        var parentEntries = await _fileShareClientService.BrowseAsync(server, parentPath, cancellationToken);
         var existingEntry = parentEntries.Entries.FirstOrDefault(entry =>
             string.Equals(entry.Name, folderName, StringComparison.OrdinalIgnoreCase));
 
@@ -1099,7 +1136,18 @@ public sealed class ClientViewModel : BindableBase
             return;
         }
 
-        await _fileShareClientService.CreateFolderAsync(server, parentPath, folderName);
+        await _fileShareClientService.CreateFolderAsync(server, parentPath, folderName, cancellationToken);
+    }
+
+    private void CancelTransfer()
+    {
+        _transferCancellationTokenSource?.Cancel();
+    }
+
+    private void DisposeTransferCancellationTokenSource()
+    {
+        _transferCancellationTokenSource?.Dispose();
+        _transferCancellationTokenSource = null;
     }
 
     private static string GetParentRelativePath(string path)
@@ -1182,6 +1230,38 @@ public sealed class ClientViewModel : BindableBase
         {
             _config.Client.BuiltInServerPort = _config.Server.ServicePort > 0 ? _config.Server.ServicePort : 49443;
         }
+
+        if (string.IsNullOrWhiteSpace(_config.Client.DownloadFolder) ||
+            string.Equals(_config.Client.DownloadFolder, GetLegacyDefaultDownloadFolder(), StringComparison.OrdinalIgnoreCase))
+        {
+            _config.Client.DownloadFolder = GetDefaultDownloadFolder();
+        }
+    }
+
+    private static string GetDefaultDownloadFolder()
+    {
+        var dDrive = DriveInfo.GetDrives()
+            .FirstOrDefault(drive =>
+                drive.IsReady &&
+                string.Equals(drive.Name, @"D:\", StringComparison.OrdinalIgnoreCase));
+
+        if (dDrive is not null)
+        {
+            return Path.Combine(dDrive.RootDirectory.FullName, "LanShare");
+        }
+
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "Downloads",
+            "LanShare");
+    }
+
+    private static string GetLegacyDefaultDownloadFolder()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "Downloads",
+            "LanShare");
     }
 
     private static string NormalizeRelativePath(string path)

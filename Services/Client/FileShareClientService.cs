@@ -101,8 +101,13 @@ public sealed class FileShareClientService : IFileShareClientService
         for (var index = 0; index < filePaths.Count; index++)
         {
             var filePath = filePaths[index];
-            await using var fileStream = File.OpenRead(filePath);
-            using var content = new MultipartFormDataContent();
+            await using var fileStream = new FileStream(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                BufferSize,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
             using var streamContent = new ProgressStreamContent(
                 fileStream,
                 BufferSize,
@@ -118,12 +123,15 @@ public sealed class FileShareClientService : IFileShareClientService
                 }));
 
             streamContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-            content.Add(streamContent, "file", Path.GetFileName(filePath));
-
-            var uri = $"{server.BaseAddress}/api/upload?user=guest&path={Uri.EscapeDataString(targetRelativePath)}";
+            var fileName = Path.GetFileName(filePath);
+            var uri =
+                $"{server.BaseAddress}/api/upload-file?user=guest&path={Uri.EscapeDataString(targetRelativePath)}&name={Uri.EscapeDataString(fileName)}";
             using var request = CreateRequest(HttpMethod.Post, uri);
-            request.Content = content;
-            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            request.Content = streamContent;
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
 
             progress?.Report(new TransferProgressInfo
@@ -399,18 +407,23 @@ public sealed class FileShareClientService : IFileShareClientService
 
         protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
         {
+            await SerializeToStreamAsync(stream, context, CancellationToken.None);
+        }
+
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+        {
             var buffer = new byte[_bufferSize];
             long totalSent = 0;
 
             while (true)
             {
-                var bytesRead = await _sourceStream.ReadAsync(buffer.AsMemory(0, buffer.Length));
+                var bytesRead = await _sourceStream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
                 if (bytesRead <= 0)
                 {
                     break;
                 }
 
-                await stream.WriteAsync(buffer.AsMemory(0, bytesRead));
+                await stream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
                 totalSent += bytesRead;
                 _progressCallback(totalSent);
             }

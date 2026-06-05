@@ -171,6 +171,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="260" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <StackPanel>
                     <TextBlock FontWeight="SemiBold" Foreground="#0F172A" Text="{Binding TransferTitle}" />
@@ -183,6 +184,11 @@
                              Maximum="100"
                              Value="{Binding TransferProgressValue, Mode=OneWay}"
                              IsIndeterminate="{Binding IsTransferIndeterminate, Mode=OneWay}" />
+                <Button Grid.Column="2"
+                        Margin="12,0,0,0"
+                        Style="{StaticResource ToolbarButtonStyle}"
+                        Command="{Binding CancelTransferCommand}"
+                        Content="取消传输" />
             </Grid>
         </Border>
     </Grid>

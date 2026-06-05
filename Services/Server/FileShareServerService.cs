@@ -16,6 +16,7 @@ namespace LanShare.Services.Server;
 public sealed class FileShareServerService : IFileShareServerService
 {
     private const string ClientNameHeader = "X-LanShare-ClientName";
+    private const int StreamCopyBufferSize = 1024 * 1024;
     private readonly FileExtensionContentTypeProvider _contentTypeProvider = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _pathSemaphores = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ConnectedClientInfo> _recentClients = new(StringComparer.OrdinalIgnoreCase);
@@ -64,6 +65,7 @@ public sealed class FileShareServerService : IFileShareServerService
         builder.WebHost.ConfigureKestrel(kestrelOptions =>
         {
             kestrelOptions.Limits.MaxRequestBodySize = null;
+            kestrelOptions.Limits.MinRequestBodyDataRate = null;
             kestrelOptions.AllowSynchronousIO = true;
         });
         builder.Services.Configure<FormOptions>(formOptions =>
@@ -237,6 +239,80 @@ public sealed class FileShareServerService : IFileShareServerService
             {
                 _uploadLimiter.Release();
             }
+            return Results.Ok();
+        });
+
+        app.MapPost("/api/upload-file", async (HttpRequest request, string? user, string? path, string? name, CancellationToken token) =>
+        {
+            TrackClient(request.HttpContext);
+            var effectiveUser = GetEffectiveUser(user);
+            var relativePath = NormalizeRelativePath(path);
+
+            if (!HasPermission(effectiveUser, relativePath, FilePermission.Write))
+            {
+                return Results.Forbid();
+            }
+
+            var targetDirectory = ResolvePath(relativePath);
+            if (targetDirectory is null || !Directory.Exists(targetDirectory))
+            {
+                return Results.BadRequest("Target directory does not exist.");
+            }
+
+            if (HasActiveDirectoryDownloadConflict(relativePath))
+            {
+                return Results.Conflict("The target directory is currently being downloaded. Please try again later.");
+            }
+
+            var safeFileName = Path.GetFileName(name ?? string.Empty);
+
+            if (string.IsNullOrWhiteSpace(safeFileName))
+            {
+                return Results.BadRequest("File name is required.");
+            }
+
+            await _uploadLimiter.WaitAsync(token);
+            string? destinationPath = null;
+            try
+            {
+                using var uploadLock = await AcquirePathLockAsync(relativePath, token);
+                destinationPath = Path.Combine(targetDirectory, safeFileName);
+                if (File.Exists(destinationPath) || Directory.Exists(destinationPath))
+                {
+                    return Results.Conflict($"File already exists: {safeFileName}");
+                }
+
+                await using var targetStream = new FileStream(
+                    destinationPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    StreamCopyBufferSize,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+                await request.Body.CopyToAsync(targetStream, token);
+                await targetStream.FlushAsync(token);
+            }
+            catch
+            {
+                if (!string.IsNullOrWhiteSpace(destinationPath) && File.Exists(destinationPath))
+                {
+                    try
+                    {
+                        File.Delete(destinationPath);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                _uploadLimiter.Release();
+            }
+
             return Results.Ok();
         });
 

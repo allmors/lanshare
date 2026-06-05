@@ -8,7 +8,7 @@ public sealed class ServerConfig
 
     public int ServicePort { get; set; } = 49443;
 
-    public int MaxConcurrentDirectoryDownloads { get; set; } = 4;
+    public int MaxConcurrentDirectoryDownloads { get; set; } = 16;
 
-    public int MaxConcurrentUploads { get; set; } = 8;
+    public int MaxConcurrentUploads { get; set; } = 32;
 }

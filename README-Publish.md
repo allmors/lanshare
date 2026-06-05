@@ -75,8 +75,8 @@ dist
 说明：
 
 - 打包后程序优先使用各自 `AppData` 下的配置文件
-- 客户端内置地址、端口等，改客户端配置
-- 服务端监听端口、共享目录、权限规则等，改服务端配置
+- 客户端内置地址、端口、下载目录等，改客户端配置
+- 服务端监听端口、共享目录、权限规则、并发参数等，改服务端配置
 
 ## 4. 传输与发现机制
 
@@ -98,17 +98,29 @@ dist
   - 目录级权限
   - 子目录继承
   - 上传/目录下载并发保护
-- 客户端遇到 `409 Conflict` 时，现已显示友好提示，而不是直接抛 HTTP 错误
 
-## 6. 发布前检查
+## 6. 最近传输相关修复
+
+- 默认下载目录优先为 `D:\LanShare`
+  - 如果机器没有 `D:` 盘，则回退到 `%UserProfile%\Downloads\LanShare`
+- 大文件上传已改为原始流直传
+  - 更适合几十 GB 文件
+  - 上传中断时服务端会清理半截文件
+- 中文文件名上传已修复
+  - 不再通过请求头传文件名
+  - 改为 URL 编码参数传文件名
+- 客户端遇到 `409 Conflict` 时显示友好提示，而不是原始 HTTP 报错
+
+## 7. 发布前检查
 
 - 确认客户端和服务端都能正常启动
 - 确认服务端监听端口与客户端目标端口一致
 - 确认 Windows 防火墙已放行
 - 确认共享目录有访问权限
 - 确认大文件上传、文件夹下载、删除、建目录都已实测
+- 确认中文文件名上传正常
 
-## 7. 常用命令
+## 8. 常用命令
 
 编译客户端：
 
@@ -127,4 +139,11 @@ dist
 ```powershell
 & 'C:\Program Files\dotnet\dotnet.exe' publish '.\LanShare.Client\LanShare.Client.csproj' -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o '.\publish\client-win-x64'
 .\scripts\build-installer.ps1 -ScriptPaths .\installer\LanShare.Client.iss
+```
+
+重新打服务端安装包：
+
+```powershell
+& 'C:\Program Files\dotnet\dotnet.exe' publish '.\LanShare.Server\LanShare.Server.csproj' -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o '.\publish\server-win-x64'
+.\scripts\build-installer.ps1 -ScriptPaths .\installer\LanShare.Server.iss
 ```

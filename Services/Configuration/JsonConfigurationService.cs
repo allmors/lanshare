@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using LanShare.Models;
@@ -83,10 +84,7 @@ public sealed class JsonConfigurationService : IConfigurationService
                 BuiltInServerPort = 49443,
                 PreferredServerAddress = string.Empty,
                 AutoConnectPreferredServerOnStartup = true,
-                DownloadFolder = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    "Downloads",
-                    "LanShare")
+                DownloadFolder = GetDefaultDownloadFolder()
             },
             Permissions = new PermissionConfig
             {
@@ -132,5 +130,23 @@ public sealed class JsonConfigurationService : IConfigurationService
                 }
             }
         };
+    }
+
+    private static string GetDefaultDownloadFolder()
+    {
+        var dDrive = DriveInfo.GetDrives()
+            .FirstOrDefault(drive =>
+                drive.IsReady &&
+                string.Equals(drive.Name, @"D:\", StringComparison.OrdinalIgnoreCase));
+
+        if (dDrive is not null)
+        {
+            return Path.Combine(dDrive.RootDirectory.FullName, "LanShare");
+        }
+
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "Downloads",
+            "LanShare");
     }
 }

@@ -3,7 +3,9 @@
   "Server": {
     "ServerName": "局域网共享-服务端",
     "SharedFolderPath": "",
-    "ServicePort": 49443
+    "ServicePort": 49443,
+    "MaxConcurrentDirectoryDownloads": 16,
+    "MaxConcurrentUploads": 32
   },
   "Discovery": {
     "DiscoveryPort": 49450,
@@ -11,7 +13,7 @@
     "DiscoveryTimeoutSeconds": 3
   },
   "Client": {
-    "DownloadFolder": "",
+    "DownloadFolder": "D:\\LanShare",
     "BuiltInServerHost": "192.168.202.163",
     "BuiltInServerPort": 49443,
     "PreferredServerAddress": "",
