@@ -1,199 +1,158 @@
-# LanShare Agent Memory
+# LanShare Memory
 
-## Project Overview
+## 项目定位
 
-- Project name: `LanShare`
-- Stack: `.NET 8`, `WPF`, `MVVM`
-- Target OS: `Windows 10`, `Windows 11`, `Windows Server 2022`
-- Architecture now uses two separate desktop apps:
+- 项目名：`LanShare`
+- 技术栈：`.NET 8`、`WPF`、`MVVM`
+- 目标系统：
+  - `Windows 10 x64`
+  - `Windows 11 x64`
+  - `Windows Server 2022 x64`
+- 交付形态：双程序
   - `LanShare.Client`
   - `LanShare.Server`
-- Original single-app project `LanShare.csproj` is still present for historical compatibility, but the active delivery model is dual-app.
 
-## Current Product Direction
+## 当前产品方向
 
-- This is a LAN file sharing tool.
-- It does **not** use `SMB`.
-- Discovery uses `UDP broadcast`.
-- File operations use `HTTP` APIs over `TCP`.
-- Main supported actions:
-  - service discovery
-  - browse shared directories
-  - download files
-  - upload files
-  - delete entries
-  - create folders
-- Permissions are path-based, directory-level, and support inheritance to child directories.
-- Config is JSON-based, no database.
+- 用于局域网文件共享与传输
+- 不使用 `SMB`
+- 不使用数据库
+- 配置全部走 `JSON`
+- 服务端负责权限控制
+- 客户端只消费服务端开放出来的能力
 
-## Current App Split
+## 当前架构
 
-### Client
+### 客户端
 
-- Project: `LanShare.Client/LanShare.Client.csproj`
-- Window title / tray text should be Chinese:
-  - `局域网共享-客户端`
-- Startup flow:
-  - show built-in server address in address bar
-  - address bar disabled initially
-  - try built-in address first
-  - if built-in connect fails, try UDP discovery
-  - only if both fail, enable manual address input
-- Discovery button logic:
-  - enabled only when not transferring and not currently connected to the built-in server
-- Client tray behavior:
-  - minimize stays on taskbar
-  - close hides to tray
-  - tray supports restore and exit
-- Current built-in server config is no longer hardcoded in code:
-  - `Client.BuiltInServerHost`
-  - `Client.BuiltInServerPort`
-- Client should preserve real LAN IP in the address bar and must not rewrite it to `127.0.0.1`.
+- 项目：`LanShare.Client/LanShare.Client.csproj`
+- 面向终端用户，尽量简化操作
+- 主要能力：
+  - 浏览共享目录
+  - 下载文件
+  - 下载文件夹
+  - 上传文件
+  - 上传文件夹
+  - 拖拽上传
+  - 删除文件/目录
+  - 创建文件夹
+- 托盘行为：
+  - 最小化保留任务栏
+  - 关闭隐藏到托盘
 
-### Server
+### 服务端
 
-- Project: `LanShare.Server/LanShare.Server.csproj`
-- Window title / tray text should be Chinese:
-  - `局域网共享-服务端`
-- Server tray behavior:
-  - close hides to tray
-  - tray supports restore and exit
-- Server UI direction:
-  - left side: service config + connected client list
-  - right side: permission editor + shared path preview + permission rules list
-- Shared path preview is meant to help choose permission paths visually based on the current shared root.
+- 项目：`LanShare.Server/LanShare.Server.csproj`
+- 主要能力：
+  - 选择共享目录
+  - 启动文件服务
+  - 广播服务发现
+  - 设置权限规则
+  - 查看连接客户端
+- 托盘行为：
+  - 关闭隐藏到托盘
 
-## Permissions System
+## 网络与传输
 
-- Users:
+- 发现：`UDP broadcast`
+- 文件操作：`HTTP API`
+- 实际传输：`HTTP/TCP`
+- 当前默认端口：
+  - `ServicePort = 49443`
+  - `DiscoveryPort = 49450`
+
+## 权限模型
+
+- 用户：
   - `admin`
   - `guest`
-- Permissions:
+- 权限：
   - `Read`
   - `Write`
   - `Delete`
-- Scope:
-  - directory-level
-  - optional inheritance to child directories
-- Config location:
-  - `Permissions.Users`
-  - `Permissions.Rules`
-- Rule editing behavior:
-  - adding a new rule appends
-  - editing an existing loaded rule replaces only that one rule
-  - fully identical duplicate rules should not be added
+- 粒度：
+  - 目录级
+  - 支持对子目录继承
+- 规则行为：
+  - 新增规则是追加
+  - 编辑规则只替换当前规则
+  - 完全相同的重复规则不应允许继续添加
 
-## Networking / Ports
+## 配置文件
 
-- User requested high ports, not commonly reserved low/global service ports.
-- Current defaults:
-  - service port: `49443`
-  - discovery port: `49450`
-- Important: built-in server address must not hardcode port in code. It must follow config.
+- 根模板：`lanshare.json`
+- 客户端运行配置：
+  - `%AppData%\LanShare.Client\lanshare.client.json`
+- 服务端运行配置：
+  - `%AppData%\LanShare.Server\lanshare.server.json`
 
-## Config Notes
+### 客户端重点配置
 
-- Root config file: `lanshare.json`
-- Important client config fields:
-  - `BuiltInServerHost`
-  - `BuiltInServerPort`
-  - `PreferredServerAddress`
-  - `AutoConnectPreferredServerOnStartup`
-  - `DownloadFolder`
-- Important server config fields:
-  - `ServerName`
-  - `SharedFolderPath`
-  - `ServicePort`
-- Discovery config fields:
-  - `DiscoveryPort`
-  - `BroadcastIntervalSeconds`
-  - `DiscoveryTimeoutSeconds`
+- `BuiltInServerHost`
+- `BuiltInServerPort`
+- `PreferredServerAddress`
+- `AutoConnectPreferredServerOnStartup`
+- `DownloadFolder`
 
-## Upload / Download Behavior
+### 服务端重点配置
 
-- Large file transfer uses HTTP streaming.
-- Progress near `100%` may still mean request finalization is in progress.
-- Current upload support now includes:
-  - file upload
-  - whole folder recursive upload
-  - drag-and-drop upload
-- Duplicate upload handling:
-  - client checks for same-name files in target remote directory
-  - duplicate files are skipped after user confirmation
-  - if all files are duplicates, upload is cancelled
-  - server also rejects overwrite by returning conflict if same-name file/folder already exists
+- `ServerName`
+- `SharedFolderPath`
+- `ServicePort`
+- 权限规则
+- 并发保护参数
 
-## Shared Path Preview / Permission UX
+## 已完成的重要功能
 
-- User felt separate “scan shared folders” block was redundant.
-- Current direction:
-  - preview shared root directly in the permission editor area
-  - selecting a file/folder fills the relative path field
-  - should feel similar to the client file list / file panel
+- 客户端/服务端拆分完成
+- 客户端支持文件夹递归上传
+- 客户端支持文件夹下载
+- 服务端目录下载改为 zip 流式打包下载
+- 中文目录名下载 `500` 已修复
+- 客户端支持重复文件检测
+- 客户端支持拖拽上传前确认
+- 服务端共享路径预览已改为可导航模式
+  - 双击进入目录
+  - 返回上级
+  - 当前层级搜索过滤
+- 服务端已增加并发保护：
+  - 限制同时目录下载数
+  - 限制同时上传数
+  - 同一路径上传串行化
+  - 目录下载中阻止同路径上传/删除/建目录
 
-## Visual / UX Preferences
+## 当前稳定性策略
 
-- User dislikes flashy or overly decorative UI.
-- UI should feel practical, plain, and professional.
-- Prefer Windows-like layout and behavior.
-- Client and server names should be Chinese-facing for customers.
-- Consistency matters more than fancy visuals.
+- 大文件传输使用流式读写
+- 客户端目录下载失败写入：
+  - `%AppData%\LanShare.Client\directory-download-client.log`
+- 服务端目录下载日志写入：
+  - `%AppData%\LanShare.Server\logs\directory-download.log`
+- 客户端现在会把 `409 Conflict` 转成用户可理解的提示，而不是直接显示 HTTP 报错
 
-## Packaging Status
+## 打包与发布
 
-- Dual self-contained publish flow is ready.
-- Publish script:
+- 发布脚本：
   - `scripts/publish-win-x64.ps1`
-- Current publish outputs:
-  - `publish/client-win-x64`
-  - `publish/server-win-x64`
-- Self-contained zip artifacts already produced:
-  - `dist/LanShare-Client-self-contained-win-x64-0.01.zip`
-  - `dist/LanShare-Server-self-contained-win-x64-0.01.zip`
-- Old installer artifact exists:
-  - `dist/LanShare-Setup-0.01.exe`
-  - this belongs to the older single-app packaging path
-- Dual installer scripts now exist:
+- 安装包脚本：
+  - `scripts/build-installer.ps1`
+- 安装器脚本：
   - `installer/LanShare.Client.iss`
   - `installer/LanShare.Server.iss`
-- Installer build script:
-  - `scripts/build-installer.ps1`
-- Current blocker for producing fresh dual `Setup.exe` installers:
-  - `ISCC.exe` was not found in standard Inno Setup install paths during recent checks
+- `build-installer.ps1` 已兼容当前机器的 Inno Setup 路径：
+  - `C:\Users\Admin\AppData\Local\Programs\Inno Setup 6\ISCC.exe`
 
-## Build / Validation Notes
+## 当前产物
 
-- When normal `dotnet build` fails because client/server EXEs or DLLs are locked by running processes, temporary output builds were used successfully:
-  - client verify output under `_verify/client*`
-  - server verify output under `_verify/server*`
-- This means source-level validation was successful even when active processes locked standard build output paths.
+- 客户端安装包：
+  - `dist/LanShare-Client-Setup-0.01.exe`
+- 服务端安装包：
+  - `dist/LanShare-Server-Setup-0.01.exe`
 
-## Important Historical User Requests
+## 协作注意事项
 
-- Client/server must be separate applications.
-- Client should be extremely simple for end users.
-- Built-in server address should be preferred first.
-- Manual address entry should be hidden/disabled unless automatic methods fail.
-- Customer environment may use A/B/C private ranges, not only C segment.
-- Server side is generally one machine; client side can be many machines.
-- Customer may preinstall client into system images.
-
-## Practical Repo Notes
-
-- There are many generated directories in this workspace:
-  - `bin`
-  - `obj`
-  - `publish`
-  - `dist`
-  - `_verify`
-  - `artifacts`
-- These should not be committed except when a human explicitly wants release artifacts tracked outside git.
-
-## If Another Agent Continues
-
-- Prefer working in the dual-app projects, not the old single-app shell.
-- Be careful with Chinese text encoding; some files previously contained mojibake and were rewritten manually.
-- Before claiming a packaging result, distinguish clearly between:
-  - self-contained publish folders / zip packages
-  - actual installer `Setup.exe` packages
-- Before running a standard build, check whether client/server processes are still running and locking outputs.
+- 用户对“大改、重写、界面乱动”非常敏感
+- 优先做小范围、可验证、可回滚的修改
+- 每次改动后尽量直接编译验证
+- PowerShell 输出中文可能乱码，但不代表源码一定乱码
+- 处理中文内容时，优先以编辑器实际文件内容为准

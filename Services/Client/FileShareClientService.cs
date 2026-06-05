@@ -31,7 +31,7 @@ public sealed class FileShareClientService : IFileShareClientService
         var uri = $"{server.BaseAddress}/api/browse?user=guest&path={Uri.EscapeDataString(relativePath)}";
         using var request = CreateRequest(HttpMethod.Get, uri);
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
 
         var result = await response.Content.ReadFromJsonAsync<BrowseResult>(cancellationToken: cancellationToken);
         return result ?? new BrowseResult();
@@ -57,7 +57,7 @@ public sealed class FileShareClientService : IFileShareClientService
 
         using var request = CreateRequest(HttpMethod.Get, uri);
         using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
 
         var totalBytes = response.Content.Headers.ContentLength;
         await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -124,7 +124,7 @@ public sealed class FileShareClientService : IFileShareClientService
             using var request = CreateRequest(HttpMethod.Post, uri);
             request.Content = content;
             using var response = await _httpClient.SendAsync(request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
 
             progress?.Report(new TransferProgressInfo
             {
@@ -147,7 +147,7 @@ public sealed class FileShareClientService : IFileShareClientService
         var uri = $"{server.BaseAddress}/api/entry?user=guest&path={Uri.EscapeDataString(entry.RelativePath)}";
         using var request = CreateRequest(HttpMethod.Delete, uri);
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
     }
 
     public async Task CreateFolderAsync(
@@ -160,7 +160,7 @@ public sealed class FileShareClientService : IFileShareClientService
             $"{server.BaseAddress}/api/folder?user=guest&path={Uri.EscapeDataString(parentRelativePath)}&name={Uri.EscapeDataString(folderName)}";
         using var request = CreateRequest(HttpMethod.Post, uri);
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
     }
 
     private async Task DownloadDirectoryAsync(
@@ -284,7 +284,7 @@ public sealed class FileShareClientService : IFileShareClientService
                     var detail = detailElement.GetString();
                     if (!string.IsNullOrWhiteSpace(detail))
                     {
-                        throw new HttpRequestException(detail, null, response.StatusCode);
+                        throw new HttpRequestException(MapFriendlyErrorMessage(response.StatusCode, detail), null, response.StatusCode);
                     }
                 }
             }
@@ -292,10 +292,33 @@ public sealed class FileShareClientService : IFileShareClientService
             {
             }
 
-            throw new HttpRequestException(body, null, response.StatusCode);
+            throw new HttpRequestException(MapFriendlyErrorMessage(response.StatusCode, body), null, response.StatusCode);
         }
 
-        response.EnsureSuccessStatusCode();
+        throw new HttpRequestException(
+            MapFriendlyErrorMessage(response.StatusCode, response.ReasonPhrase),
+            null,
+            response.StatusCode);
+    }
+
+    private static string MapFriendlyErrorMessage(HttpStatusCode? statusCode, string? detail)
+    {
+        var message = detail?.Trim();
+        if (statusCode == HttpStatusCode.Conflict)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return "当前目录正在被其他操作占用，请稍后重试。";
+            }
+
+            return message.Contains("目录", StringComparison.OrdinalIgnoreCase)
+                ? message
+                : $"操作冲突：{message}";
+        }
+
+        return string.IsNullOrWhiteSpace(message)
+            ? $"请求失败：{(int?)statusCode ?? 0}"
+            : message;
     }
 
     private static string GetUniqueDirectoryPath(string targetFolder, string directoryName)

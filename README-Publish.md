@@ -1,90 +1,130 @@
-# LanShare Packaging Guide
+# LanShare 发布说明
 
-## 1. Build the publish folder
+## 当前交付形态
 
-Run from the project root:
+- 双程序：
+  - `LanShare.Client`
+  - `LanShare.Server`
+- 平台：
+  - `Windows 10 x64`
+  - `Windows 11 x64`
+  - `Windows Server 2022 x64`
+- 发布方式：
+  - `self-contained` 自包含
+  - 目标机器不需要单独安装 `.NET 8`
+
+## 1. 生成自包含发布目录
+
+在项目根目录执行：
 
 ```powershell
 .\scripts\publish-win-x64.ps1
 ```
 
-Optional `ReadyToRun` publish:
+可选预编译优化：
 
 ```powershell
 .\scripts\publish-win-x64.ps1 -ReadyToRun
 ```
 
-Output folder:
+输出目录：
 
 ```text
-publish\win-x64
+publish\client-win-x64
+publish\server-win-x64
 ```
 
-This produces a self-contained `win-x64` build for Windows 10, Windows 11, and Windows Server 2022.
+## 2. 生成安装包
 
-## 2. Build the installer
-
-Install `Inno Setup 6`, then run:
+在项目根目录执行：
 
 ```powershell
 .\scripts\build-installer.ps1
 ```
 
-Or open this script manually:
+说明：
 
-```text
-installer\LanShare.iss
-```
+- 脚本会自动查找 `ISCC.exe`
+- 当前已兼容以下路径：
+  - `C:\Users\Admin\AppData\Local\Programs\Inno Setup 6\ISCC.exe`
+  - `C:\Program Files\Inno Setup 6\ISCC.exe`
+  - `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`
 
-Installer output folder:
+输出目录：
 
 ```text
 dist
 ```
 
-## 3. Packaging strategy
+当前安装包命名：
 
-- Self-contained publish: target machine does not need a separate .NET 8 runtime install
-- Non-single-file publish: safer for this app because it includes config files and network services
-- ReadyToRun: optional cold-start optimization
-- Install folder: `C:\Program Files\LanShare`
-- User config folder: `%AppData%\LanShare\lanshare.json`
+- `LanShare-Client-Setup-0.01.exe`
+- `LanShare-Server-Setup-0.01.exe`
 
-## 4. Config behavior
+## 3. 配置文件位置
 
-- `lanshare.json` is published with the app as the default template
-- On first launch, the app copies that template to `%AppData%\LanShare\lanshare.json`
-- After that, the app reads and writes the user-scoped config file instead of writing into `Program Files`
+开发模板配置：
 
-## 5. Before release
+- 项目根目录：`lanshare.json`
 
-- Test on Windows 10, Windows 11, and Windows Server 2022 Desktop Experience
-- Confirm Windows Firewall access on first launch
-- Confirm the service port and UDP discovery port are available
-- For public distribution, add code signing to reduce SmartScreen and antivirus warnings
+运行后用户配置：
 
-## 6. Transfer architecture
+- 客户端：`%AppData%\LanShare.Client\lanshare.client.json`
+- 服务端：`%AppData%\LanShare.Server\lanshare.server.json`
 
-- Server discovery uses `UDP broadcast`
-- File browsing, upload, download, delete, and folder creation use `HTTP` APIs
-- Actual file transfer runs over `HTTP` on top of `TCP`
-- The project does not use `SMB`
+说明：
 
-## 7. Why file transfer uses HTTP/TCP
+- 打包后程序优先使用各自 `AppData` 下的配置文件
+- 客户端内置地址、端口等，改客户端配置
+- 服务端监听端口、共享目录、权限规则等，改服务端配置
 
-- `UDP` is used only for LAN discovery because broadcast discovery is simple and efficient
-- `UDP` is not used for file payload transfer because reliability, retransmission, ordering, and flow control would all need to be implemented manually
-- `TCP` is the better fit for file transfer because it already provides reliable ordered delivery
-- `HTTP` keeps the implementation simple, debuggable, and easy to extend with permissions, browsing, upload, download, and deletion endpoints
+## 4. 传输与发现机制
 
-## 8. Large file progress behavior
+- 服务发现：`UDP broadcast`
+- 文件浏览、上传、下载、删除、建目录：`HTTP API`
+- 实际传输链路：`HTTP/TCP`
+- 不使用：`SMB`
 
-- Progress close to `100%` means the client has nearly finished sending or receiving the file stream
-- Final completion only happens after the server finishes the write, closes the stream, and returns a successful response
-- Because of that, large files may briefly show a finishing stage before the transfer is marked complete
-- The UI now keeps the transfer in a finishing state near completion and only shows `Transfer completed` after the request fully succeeds
+## 5. 当前重要行为
 
-## 9. Current design choice
+- 客户端已支持：
+  - 文件下载
+  - 文件夹下载
+  - 文件上传
+  - 文件夹递归上传
+  - 拖拽上传
+  - 重名文件检测
+- 服务端已支持：
+  - 目录级权限
+  - 子目录继承
+  - 上传/目录下载并发保护
+- 客户端遇到 `409 Conflict` 时，现已显示友好提示，而不是直接抛 HTTP 错误
 
-- Keep the current `UDP discovery + HTTP/TCP transfer` design
-- This is the best balance of stability, implementation cost, maintainability, and LAN performance for the current LanShare scope
+## 6. 发布前检查
+
+- 确认客户端和服务端都能正常启动
+- 确认服务端监听端口与客户端目标端口一致
+- 确认 Windows 防火墙已放行
+- 确认共享目录有访问权限
+- 确认大文件上传、文件夹下载、删除、建目录都已实测
+
+## 7. 常用命令
+
+编译客户端：
+
+```powershell
+& 'C:\Program Files\dotnet\dotnet.exe' build .\LanShare.Client\LanShare.Client.csproj -c Release
+```
+
+编译服务端：
+
+```powershell
+& 'C:\Program Files\dotnet\dotnet.exe' build .\LanShare.Server\LanShare.Server.csproj -c Release
+```
+
+重新打客户端安装包：
+
+```powershell
+& 'C:\Program Files\dotnet\dotnet.exe' publish '.\LanShare.Client\LanShare.Client.csproj' -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o '.\publish\client-win-x64'
+.\scripts\build-installer.ps1 -ScriptPaths .\installer\LanShare.Client.iss
+```

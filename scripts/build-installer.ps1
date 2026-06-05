@@ -13,6 +13,7 @@ if ($ScriptPaths.Count -eq 0) {
 }
 
 $candidatePaths = @(
+    "C:\Users\Admin\AppData\Local\Programs\Inno Setup 6\ISCC.exe",
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 )

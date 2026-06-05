@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -61,12 +62,13 @@ public sealed class ClientViewModel : BindableBase
             () => !string.IsNullOrWhiteSpace(ServerAddressInput) && !IsTransferActive,
             HandleError);
         DiscoverServersCommand = new AsyncRelayCommand(
+            // Keep LAN discovery code for future use, but do not use it in the current client flow.
             () => DiscoverServersAsync(autoConnect: false, unlockManualInputOnFailure: true),
             () => !IsTransferActive && !IsBuiltInServerConnected,
             HandleError);
         BrowseSelectedServerCommand = new AsyncRelayCommand(
             BrowseSelectedServerAsync,
-            () => SelectedServer is not null && !IsTransferActive,
+            () => !IsTransferActive,
             HandleError);
         DownloadSelectedItemCommand = new AsyncRelayCommand(
             DownloadSelectedItemAsync,
@@ -283,7 +285,7 @@ public sealed class ClientViewModel : BindableBase
             return;
         }
 
-        await ConnectBuiltInServerThenDiscoverAsync();
+        await ConnectBuiltInServerWithRetryAsync();
     }
 
     public bool CanAcceptFileDrop()
@@ -326,7 +328,8 @@ public sealed class ClientViewModel : BindableBase
         await UploadItemsToCurrentDirectoryAsync(droppedItems);
     }
 
-    private async Task ConnectBuiltInServerThenDiscoverAsync()
+    #pragma warning disable CS0162
+    private async Task ConnectBuiltInServerWithRetryAsync()
     {
         var builtInAddress = BuildBuiltInServerAddress();
         ServerAddressInput = builtInAddress;
@@ -334,6 +337,22 @@ public sealed class ClientViewModel : BindableBase
         IsBuiltInServerConnected = false;
 
         var connectTimeoutSeconds = Math.Max(2, _config.Discovery.DiscoveryTimeoutSeconds);
+        const int maxRetryCount = 3;
+
+        for (var attempt = 1; attempt <= maxRetryCount; attempt++)
+        {
+            ClientStatus = $"正在连接内置共享服务，第 {attempt}/{maxRetryCount} 次...";
+            _statusCallback(ClientStatus);
+
+            if (await TryConnectToAddressAsync(builtInAddress, connectTimeoutSeconds))
+            {
+                return;
+            }
+        }
+
+        ClientStatus = "内置共享服务连接失败，请点击重试。";
+        _statusCallback(ClientStatus);
+        return;
         ClientStatus = "正在连接共享服务...";
         _statusCallback(ClientStatus);
 
@@ -353,8 +372,15 @@ public sealed class ClientViewModel : BindableBase
             ? BuildBuiltInServerAddress()
             : ServerAddressInput.Trim();
 
+        if (string.Equals(address.TrimEnd('/'), BuildBuiltInServerAddress().TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+        {
+            await ConnectBuiltInServerWithRetryAsync();
+            return;
+        }
+
         await ConnectToAddressAsync(address, Math.Max(3, _config.Discovery.DiscoveryTimeoutSeconds + 1));
     }
+    #pragma warning restore CS0162
 
     private async Task DiscoverServersAsync(bool autoConnect, bool unlockManualInputOnFailure)
     {
@@ -417,7 +443,7 @@ public sealed class ClientViewModel : BindableBase
     {
         if (SelectedServer is null)
         {
-            await ConnectBuiltInServerThenDiscoverAsync();
+            await ConnectBuiltInServerWithRetryAsync();
             return;
         }
 
@@ -643,7 +669,7 @@ public sealed class ClientViewModel : BindableBase
         var result = await _fileShareClientService.BrowseAsync(SelectedServer, CurrentRelativePath);
         ApplyBrowseResult(result, CurrentRelativePath);
 
-        ClientStatus = $"已连接共享服务，当前目录 {CurrentPathDisplay}";
+        ClientStatus = "已连接共享服务";
         _statusCallback(ClientStatus);
     }
 
@@ -692,8 +718,30 @@ public sealed class ClientViewModel : BindableBase
     private void HandleError(Exception ex)
     {
         EndTransferAfterFailure();
-        ClientStatus = $"操作失败：{ex.Message}";
+        ClientStatus = $"操作失败：{BuildUserFriendlyErrorMessage(ex)}";
         _statusCallback(ClientStatus);
+    }
+
+    private static string BuildUserFriendlyErrorMessage(Exception ex)
+    {
+        var message = ex.Message?.Trim();
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return "请稍后重试。";
+        }
+
+        if (ex is HttpRequestException || ex.InnerException is System.Net.Sockets.SocketException)
+        {
+            if (message.Contains("actively refused", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("由于目标计算机积极拒绝", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("No connection could be made", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("无法连接", StringComparison.OrdinalIgnoreCase))
+            {
+                return "共享服务当前不可用，请确认服务端已启动后重试。";
+            }
+        }
+
+        return message;
     }
 
     private void RaiseCommandStates()
@@ -832,9 +880,7 @@ public sealed class ClientViewModel : BindableBase
         IsServerAddressInputEnabled = false;
         UpdateBuiltInServerConnectionState(target.Server);
 
-        var status = string.IsNullOrWhiteSpace(target.InitialRelativePath)
-            ? "已连接到共享服务"
-            : $"已连接到共享服务，已打开目录 {CurrentPathDisplay}";
+        var status = "已连接到共享服务";
 
         ClientStatus = status;
         _statusCallback(status);
