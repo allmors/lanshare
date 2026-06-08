@@ -1,5 +1,6 @@
+using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -13,10 +14,6 @@ public sealed class FileShareClientService : IFileShareClientService
 {
     private const int BufferSize = 1024 * 128;
     private const string ClientNameHeader = "X-LanShare-ClientName";
-    private static readonly string ClientDirectoryDownloadLogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "LanShare.Client",
-        "directory-download-client.log");
 
     private readonly HttpClient _httpClient = new(new HttpClientHandler())
     {
@@ -52,43 +49,17 @@ public sealed class FileShareClientService : IFileShareClientService
             return;
         }
 
-        var uri = $"{server.BaseAddress}/api/download?user=guest&path={Uri.EscapeDataString(entry.RelativePath)}";
         var filePath = Path.Combine(targetFolder, entry.Name);
-
-        using var request = CreateRequest(HttpMethod.Get, uri);
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
-
-        var totalBytes = response.Content.Headers.ContentLength;
-        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using var destination = File.Create(filePath);
-
-        await CopyStreamWithProgressAsync(
-            source,
-            destination,
-            totalBytes,
-            bytesTransferred => progress?.Report(new TransferProgressInfo
-            {
-                Operation = "下载",
-                FileName = entry.Name,
-                BytesTransferred = bytesTransferred,
-                TotalBytes = totalBytes,
-                FileIndex = 1,
-                FileCount = 1,
-                IsCompleted = false
-            }),
+        await DownloadFileToPathAsync(
+            server,
+            entry,
+            filePath,
+            progress,
+            fileIndex: 1,
+            fileCount: 1,
+            totalBytesOverride: entry.Size > 0 ? entry.Size : null,
+            aggregateBytesCompleted: 0,
             cancellationToken);
-
-        progress?.Report(new TransferProgressInfo
-        {
-            Operation = "下载",
-            FileName = entry.Name,
-            BytesTransferred = totalBytes ?? 0,
-            TotalBytes = totalBytes,
-            FileIndex = 1,
-            FileCount = 1,
-            IsCompleted = true
-        });
     }
 
     public async Task UploadFilesAsync(
@@ -137,7 +108,7 @@ public sealed class FileShareClientService : IFileShareClientService
             progress?.Report(new TransferProgressInfo
             {
                 Operation = "上传",
-                FileName = Path.GetFileName(filePath),
+                FileName = fileName,
                 BytesTransferred = fileStream.Length,
                 TotalBytes = fileStream.Length,
                 FileIndex = index + 1,
@@ -178,100 +149,168 @@ public sealed class FileShareClientService : IFileShareClientService
         IProgress<TransferProgressInfo>? progress,
         CancellationToken cancellationToken)
     {
-        var uri = $"{server.BaseAddress}/api/download-directory?user=guest&path={Uri.EscapeDataString(entry.RelativePath)}";
-        var archivePath = Path.Combine(Path.GetTempPath(), $"LanShare-{Guid.NewGuid():N}.zip");
-        var extractRoot = GetUniqueDirectoryPath(targetFolder, entry.Name);
+        var targetRoot = GetUniqueDirectoryPath(targetFolder, entry.Name);
+        var plan = await BuildDirectoryDownloadPlanAsync(server, entry, cancellationToken);
 
-        try
+        Directory.CreateDirectory(targetRoot);
+        foreach (var directoryRelativePath in plan.DirectoryRelativePaths)
         {
-            using var request = CreateRequest(HttpMethod.Get, uri);
-            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
+            Directory.CreateDirectory(Path.Combine(targetRoot, ConvertToLocalPath(directoryRelativePath)));
+        }
 
-            var totalBytes = response.Content.Headers.ContentLength;
-            await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken))
-            await using (var destination = File.Create(archivePath))
-            {
-                await CopyStreamWithProgressAsync(
-                    source,
-                    destination,
-                    totalBytes,
-                    bytesTransferred => progress?.Report(new TransferProgressInfo
-                    {
-                        Operation = "下载",
-                        FileName = entry.Name,
-                        BytesTransferred = bytesTransferred,
-                        TotalBytes = totalBytes,
-                        FileIndex = 1,
-                        FileCount = 1,
-                        IsCompleted = false
-                    }),
-                    cancellationToken);
-            }
-
-            Directory.CreateDirectory(extractRoot);
-            try
-            {
-                ZipFile.ExtractToDirectory(archivePath, extractRoot, overwriteFiles: false);
-            }
-            catch (Exception ex)
-            {
-                LogClientDirectoryDownloadFailure(server, entry, archivePath, extractRoot, ex);
-                throw new IOException($"目录下载后解压失败：{entry.Name}。{ex.Message}", ex);
-            }
-
+        if (plan.Files.Count == 0)
+        {
             progress?.Report(new TransferProgressInfo
             {
                 Operation = "下载",
                 FileName = entry.Name,
-                BytesTransferred = totalBytes ?? new FileInfo(archivePath).Length,
-                TotalBytes = totalBytes,
-                FileIndex = 1,
-                FileCount = 1,
+                BytesTransferred = 0,
+                TotalBytes = 0,
+                OverallBytesTransferred = 0,
+                OverallTotalBytes = 0,
+                FileIndex = 0,
+                FileCount = 0,
                 IsCompleted = true
             });
+            return;
         }
-        finally
+
+        long aggregateBytesCompleted = 0;
+        for (var index = 0; index < plan.Files.Count; index++)
         {
-            if (File.Exists(archivePath))
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var file = plan.Files[index];
+            var destinationPath = Path.Combine(targetRoot, ConvertToLocalPath(file.RelativePathUnderRoot));
+            var destinationDirectory = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrWhiteSpace(destinationDirectory))
             {
-                File.Delete(archivePath);
+                Directory.CreateDirectory(destinationDirectory);
             }
+
+            await DownloadFileToPathAsync(
+                server,
+                file.Entry,
+                destinationPath,
+                progress,
+                index + 1,
+                plan.Files.Count,
+                plan.TotalBytes,
+                aggregateBytesCompleted,
+                cancellationToken);
+
+            aggregateBytesCompleted += file.Entry.Size;
         }
     }
 
-    private static void LogClientDirectoryDownloadFailure(
+    private async Task<RemoteDirectoryDownloadPlan> BuildDirectoryDownloadPlanAsync(
         DiscoveredServer server,
-        BrowseEntry entry,
-        string archivePath,
-        string extractRoot,
-        Exception exception)
+        BrowseEntry rootEntry,
+        CancellationToken cancellationToken)
     {
-        try
+        var directories = new List<string>();
+        var files = new List<RemoteFileDownloadItem>();
+
+        await CollectDirectoryPlanAsync(server, rootEntry.RelativePath, string.Empty, directories, files, cancellationToken);
+
+        return new RemoteDirectoryDownloadPlan(
+            directories,
+            files,
+            files.Sum(item => item.Entry.Size));
+    }
+
+    private async Task CollectDirectoryPlanAsync(
+        DiscoveredServer server,
+        string remoteRelativePath,
+        string relativePathUnderRoot,
+        ICollection<string> directories,
+        ICollection<RemoteFileDownloadItem> files,
+        CancellationToken cancellationToken)
+    {
+        var result = await BrowseAsync(server, remoteRelativePath, cancellationToken);
+        foreach (var child in result.Entries)
         {
-            var logDirectory = Path.GetDirectoryName(ClientDirectoryDownloadLogPath);
-            if (!string.IsNullOrWhiteSpace(logDirectory))
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var childRelativePathUnderRoot = string.IsNullOrWhiteSpace(relativePathUnderRoot)
+                ? child.Name
+                : $"{relativePathUnderRoot}/{child.Name}";
+
+            if (child.IsDirectory)
             {
-                Directory.CreateDirectory(logDirectory);
+                directories.Add(childRelativePathUnderRoot);
+                await CollectDirectoryPlanAsync(
+                    server,
+                    child.RelativePath,
+                    childRelativePathUnderRoot,
+                    directories,
+                    files,
+                    cancellationToken);
+                continue;
             }
 
-            var message = string.Join(
-                Environment.NewLine,
-                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 客户端目录解压失败",
-                $"服务端: {server.BaseAddress}",
-                $"目录: {entry.RelativePath}",
-                $"临时压缩包: {archivePath}",
-                $"解压目标: {extractRoot}",
-                $"异常类型: {exception.GetType().FullName}",
-                $"异常消息: {exception.Message}",
-                exception.StackTrace ?? string.Empty,
-                new string('-', 80));
+            files.Add(new RemoteFileDownloadItem(child, childRelativePathUnderRoot));
+        }
+    }
 
-            File.AppendAllText(ClientDirectoryDownloadLogPath, message + Environment.NewLine, System.Text.Encoding.UTF8);
-        }
-        catch
+    private async Task DownloadFileToPathAsync(
+        DiscoveredServer server,
+        BrowseEntry entry,
+        string filePath,
+        IProgress<TransferProgressInfo>? progress,
+        int fileIndex,
+        int fileCount,
+        long? totalBytesOverride,
+        long aggregateBytesCompleted,
+        CancellationToken cancellationToken)
+    {
+        var uri = $"{server.BaseAddress}/api/download?user=guest&path={Uri.EscapeDataString(entry.RelativePath)}";
+        using var request = CreateRequest(HttpMethod.Get, uri);
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        await EnsureSuccessStatusCodeWithDetailsAsync(response, cancellationToken);
+
+        var fileTotalBytes = response.Content.Headers.ContentLength ?? (entry.Size > 0 ? entry.Size : 0);
+        var overallTotalBytes = totalBytesOverride ?? response.Content.Headers.ContentLength;
+
+        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await using var destination = new FileStream(
+            filePath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            BufferSize,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        await CopyStreamWithProgressAsync(
+            source,
+            destination,
+            fileTotalBytes,
+            bytesTransferred => progress?.Report(new TransferProgressInfo
+            {
+                Operation = "下载",
+                FileName = entry.Name,
+                BytesTransferred = bytesTransferred,
+                TotalBytes = fileTotalBytes,
+                OverallBytesTransferred = aggregateBytesCompleted + bytesTransferred,
+                OverallTotalBytes = overallTotalBytes,
+                FileIndex = fileIndex,
+                FileCount = fileCount,
+                IsCompleted = false
+            }),
+            cancellationToken);
+
+        progress?.Report(new TransferProgressInfo
         {
-        }
+            Operation = "下载",
+            FileName = entry.Name,
+            BytesTransferred = fileTotalBytes,
+            TotalBytes = fileTotalBytes,
+            OverallBytesTransferred = aggregateBytesCompleted + fileTotalBytes,
+            OverallTotalBytes = overallTotalBytes,
+            FileIndex = fileIndex,
+            FileCount = fileCount,
+            IsCompleted = true
+        });
     }
 
     private static async Task EnsureSuccessStatusCodeWithDetailsAsync(HttpResponseMessage response, CancellationToken cancellationToken)
@@ -380,6 +419,11 @@ public sealed class FileShareClientService : IFileShareClientService
         }
     }
 
+    private static string ConvertToLocalPath(string relativePath)
+    {
+        return relativePath.Replace('/', Path.DirectorySeparatorChar);
+    }
+
     private sealed class ProgressStreamContent : HttpContent
     {
         private readonly Stream _sourceStream;
@@ -429,4 +473,11 @@ public sealed class FileShareClientService : IFileShareClientService
             }
         }
     }
+
+    private sealed record RemoteFileDownloadItem(BrowseEntry Entry, string RelativePathUnderRoot);
+
+    private sealed record RemoteDirectoryDownloadPlan(
+        IReadOnlyList<string> DirectoryRelativePaths,
+        IReadOnlyList<RemoteFileDownloadItem> Files,
+        long TotalBytes);
 }

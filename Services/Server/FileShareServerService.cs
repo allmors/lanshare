@@ -552,7 +552,7 @@ public sealed class FileShareServerService : IFileShareServerService
             try
             {
                 var archiveEntryName = Path.GetRelativePath(fullPath, filePath).Replace('\\', '/');
-                var entry = archive.CreateEntry(archiveEntryName, CompressionLevel.Fastest);
+                var entry = archive.CreateEntry(archiveEntryName, CompressionLevel.NoCompression);
                 await using var entryStream = entry.Open();
                 await using var fileStream = new FileStream(
                     filePath,

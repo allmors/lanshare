@@ -825,7 +825,30 @@ public sealed class ClientViewModel : BindableBase
             ? $"{progress.Operation} {progress.FileIndex}/{progress.FileCount}: {progress.FileName}"
             : $"{progress.Operation}: {progress.FileName}";
 
-        if (progress.TotalBytes.HasValue && progress.TotalBytes.Value > 0)
+        if (progress.FileCount > 1 && progress.OverallTotalBytes.HasValue && progress.OverallTotalBytes.Value > 0)
+        {
+            IsTransferIndeterminate = false;
+
+            var fileBasedProgress = progress.IsCompleted
+                ? progress.FileIndex
+                : Math.Max(progress.FileIndex - 1, 0);
+            var progressValue = progress.FileCount <= 0
+                ? 0
+                : Math.Round(fileBasedProgress * 100d / progress.FileCount, 1);
+
+            TransferProgressValue = progress.IsCompleted && progress.FileIndex >= progress.FileCount
+                ? 100
+                : Math.Min(progressValue, 99.9);
+
+            var currentTotalBytes = progress.TotalBytes ?? 0;
+            var currentBytesTransferred = progress.BytesTransferred;
+            var overallBytesTransferred = progress.OverallBytesTransferred ?? 0;
+            var overallTotalBytes = progress.OverallTotalBytes.Value;
+
+            TransferProgressText =
+                $"{TransferProgressValue:0.0}%   当前文件 {FormatBytes(currentBytesTransferred)} / {FormatBytes(currentTotalBytes)}   总进度 {progress.FileIndex}/{progress.FileCount}   总容量 {FormatBytes(overallBytesTransferred)} / {FormatBytes(overallTotalBytes)}";
+        }
+        else if (progress.TotalBytes.HasValue && progress.TotalBytes.Value > 0)
         {
             IsTransferIndeterminate = false;
             var rawProgressValue = Math.Round(progress.BytesTransferred * 100d / progress.TotalBytes.Value, 1);

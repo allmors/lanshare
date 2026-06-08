@@ -10,6 +10,10 @@ public sealed class TransferProgressInfo
 
     public long? TotalBytes { get; init; }
 
+    public long? OverallBytesTransferred { get; init; }
+
+    public long? OverallTotalBytes { get; init; }
+
     public int FileIndex { get; init; }
 
     public int FileCount { get; init; }
